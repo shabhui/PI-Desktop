@@ -4,6 +4,7 @@
 - Date: 2026-09-13
 - Deciders: PI-Desktop maintainers
 - Amends: ADR 0233, ADR 0234, ADR 0016
+- Amended by: ADR 0326 (the primary root can be switched from Edit project)
 
 ## Context
 
@@ -40,10 +41,12 @@ policy.
 6. The project overflow action is named **Edit project**. The editor can change
    the group name and adjust its root list through the additive
    `project.group.update` capability. The primary root remains first and cannot
-   be removed. An additional root can be detached even when it has chats; those
-   chats remain available under the detached path as a standalone project.
-   Future chats use that project's path-scoped context, while the group's shared
-   instructions and memory remain with the original group.
+   be removed, and every non-primary row offers Make primary, which promotes that
+   folder to the first position (ADR 0326). An additional root can be detached
+   even when it has chats; those chats remain available under the detached path
+   as a standalone project. Future chats use that project's path-scoped context,
+   while the group's shared instructions and memory remain with the original
+   group.
 7. Group creation, editing, shared instruction editing, and shared memory editing
    are additive IPC capabilities. Legacy path-scoped instruction and memory
    APIs remain available for legacy single-root groups.
@@ -54,11 +57,13 @@ policy.
   instructions, and memory are shared across the selected roots.
 - Existing projects retain their paths, sessions, transcripts, and renderer
   presentation metadata.
-- The first folder remains meaningful as the default execution root and cannot
-  be reordered in this iteration. Additional roots can be adjusted from Edit
-  project; detaching one with chats preserves those sessions as a standalone
-  project. Group membership and path access still pass host ownership checks
-  and explicit absolute paths through host canonical containment.
+- The first folder remains meaningful as the default execution root. ADR 0326 lets
+  the user choose which folder that is: Edit project promotes a non-primary
+  folder to primary, and the primary row itself stays non-removable. Additional
+  roots can be adjusted from Edit project; detaching one with chats preserves
+  those sessions as a standalone project. Group membership and path access still
+  pass host ownership checks and explicit absolute paths through host canonical
+  containment.
 - Selecting another group still changes the one visible host workspace; a
   background session remains bound to its own primary path.
 - The native picker remains local-only. Remote project sources are not implied.

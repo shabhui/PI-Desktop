@@ -1694,6 +1694,7 @@ sklm: {
     "editSaving": "Enregistrement…",
     "editCancel": "Annuler",
     "editPrimaryLocked": "Le dossier principal ne peut pas être supprimé",
+   "editMakePrimary": "Définir comme principal",
     "editInstructions": "Instructions du projet",
     "instructionsSaved": "Instructions du projet enregistrées",
     "editMemory": "Mémoire du projet",

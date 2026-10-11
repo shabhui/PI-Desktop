@@ -1689,6 +1689,7 @@ sklm: {
     editSaving: "儲存中…",
     editCancel: "取消",
     editPrimaryLocked: "主要資料夾不能移除",
+   editMakePrimary: "設為主要資料夾",
     editInstructions: "專案指示",
     instructionsSaved: "專案指示已儲存",
     editMemory: "專案記憶",

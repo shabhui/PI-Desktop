@@ -29,7 +29,7 @@ test("project rows expose an edit action in both project surfaces", () => {
 test("project edit dialog updates names and adjusts folder roots", () => {
   assert.match(dialogSource, /export function ProjectEditDialog/);
   assert.match(dialogSource, /listProjectGroups\(\)/);
-  assert.match(dialogSource, /api\.updateProjectGroup\(group\.id, trimmedName, folders\)/);
+  assert.match(dialogSource, /api\.updateProjectGroup\(group\.id, trimmedName, orderedFolders\)/);
   assert.match(dialogSource, /api\.pickProjectFolders\(\)/);
   assert.match(dialogSource, /setFolders\(\(current\) =>[\s\S]*?current\.filter/);
   assert.match(dialogSource, /busy \|\| primary/);
@@ -37,6 +37,28 @@ test("project edit dialog updates names and adjusts folder roots", () => {
   assert.match(dialogSource, /aria-modal="true"/);
   assert.match(dialogSource, /useBlockingOverlay\(\)/);
   assert.match(dialogSource, /event\.key === "Escape"/);
+});
+
+test("project edit lets the user switch the primary folder and submits it first", () => {
+  // A project whose primary folder was moved or deleted used to be stuck: the
+  // dialog could neither drop it nor promote another folder, and the host
+  // rejects any update that still lists a folder that is not a directory.
+  assert.match(dialogSource, /const makePrimary = \(path: string\) =>/);
+  assert.match(dialogSource, /setPrimaryPath\(path\)/);
+  assert.match(
+    dialogSource,
+    /setFolders\(\(current\) => \[\s*path,\s*\.\.\.current\.filter\(\(item\) => !samePath\(item, path\)\),\s*\]\)/,
+  );
+  assert.match(
+    dialogSource,
+    /const orderedFolders = \[\s*primaryPath,\s*\.\.\.folders\.filter\(\(path\) => !samePath\(path, primaryPath\)\),\s*\];/,
+  );
+  assert.match(
+    dialogSource,
+    /api\.updateProjectGroup\(group\.id, trimmedName, orderedFolders\)/,
+  );
+  assert.doesNotMatch(dialogSource, /api\.updateProjectGroup\(group\.id, trimmedName, folders\)/);
+  assert.match(dialogSource, /onClick=\{\(\) => makePrimary\(path\)\}/);
 });
 
 test("project group update is available through the host RPC and preload API", () => {
@@ -56,6 +78,7 @@ for (const [locale, source] of [["en", enSource], ["zh-CN", zhSource], ["tr", tr
       "editSaving",
       "editCancel",
       "editPrimaryLocked",
+      "editMakePrimary",
     ]) {
       assert.match(source, new RegExp(`(?:\\b${key}|"${key}"):`));
     }

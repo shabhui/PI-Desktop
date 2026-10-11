@@ -1694,6 +1694,7 @@ sklm: {
     "editSaving": "Guardando…",
     "editCancel": "Cancelar",
     "editPrimaryLocked": "La carpeta principal no se puede eliminar",
+   "editMakePrimary": "Establecer como principal",
     "editInstructions": "Instrucciones del proyecto",
     "instructionsSaved": "Instrucciones del proyecto guardadas",
     "editMemory": "Memoria del proyecto",

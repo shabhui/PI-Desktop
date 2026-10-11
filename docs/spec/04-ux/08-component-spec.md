@@ -545,9 +545,14 @@ visually distinct from list content.
   the workspace list with a softly filled Add folder action; the field does not
   repeat its label as placeholder text and uses the shared field well plus the
   accent-tinted focus ring, not an outline stroke. Edit project reuses the same
-  surface, loads the host-owned group, allows the name and non-primary folders
-  to be adjusted, keeps Primary first and non-removable, and rejects removal of
-  a folder that still owns chats. Background session or run-status updates
+  surface, loads the host-owned group, allows the name and the folder list to be
+  adjusted, keeps exactly one Primary folder, and rejects removal of a folder
+  that still owns chats. Every non-primary folder row offers Make primary: it
+  moves that folder to the top of the list, and the saved payload leads with the
+  primary folder so the host records the same root as primary. The Primary row
+  itself stays non-removable, so switching primary is the way to retire a folder
+  — including one that was moved or deleted on disk, which the host refuses to
+  keep in an update. Background session or run-status updates
   must preserve unsaved name and folder edits in the open editor. The source selector offers This computer and
   Git repository as equal filled tiles without strokes (D297); the active source
   uses a deeper tile, not a selected border. A repository URL reuses the clone

@@ -49,6 +49,7 @@ This log freezes previously open questions into concrete decisions.
 | D653 | Make Composer prompt enhancement an optional plugin | **Supersede ADR 0121: remove host-owned prompt-enhancement UI, settings, direct completion IPC, and MCP action. Add the permission-gated `composer.transform` contribution and plugin callback, passing only the current draft plus an optional model key, with bounded input/output, audit, file-reference restoration, one-step undo, and stale session/draft guards. Keep `vastsa/pi-prompt-enhancement` in its own repository and require explicit user installation; do not bundle or enable it by default. On first plugin load, copy valid legacy preferences into unset plugin settings and write a private migration marker; preserve old host values for rollback. See ADR 0324, E2E-218 / E2E-259, and the plugin API/permission specs.** | Prompt enhancement is optional behavior that belongs to a separately installed plugin, while the host needs a narrow safe transform contract and a one-time path for existing settings. |
 | D654 | Keep the deterministic first-prompt session title in the core | **Amend D652 / ADR 0323: a session whose stored title is still a recognized placeholder derives a whitespace-collapsed 48-character fallback from the first prompt, written through the host RPC and IPC `session/deriveTitle`. Host-core applies it only while the title is still a placeholder with the `default` source, and the derived text keeps that source, so an installed title plugin may still replace it and only a manual rename opts out. No model call, no new permission, no schema or protocol version change; `updated_at`, transcript content, and message count stay unchanged. See `03-runtime/01-ipc-protocol.md`, `03-runtime/02-agent-runtime.md`, `03-runtime/06-host-rpc-protocol.md`, `03-runtime/04-data-storage.md`, `04-ux/08-component-spec.md`, and E2E-021a.** | Removing every automatic write left an untouched session showing a placeholder until a plugin ran, so offline readability depended on installing optional software. |
 | D655 | Cloud sync opens in packaged builds as Experimental | **Amend D649: remove the packaged-build visibility gate from Settings `sync` and restore its `Experimental` badge on the rail row and page title. Cloud sync and Remote Hosts are both available in packaged and development builds with Experimental badges. The S3 sync behavior, protocol, Host schema, and persisted data are unchanged. See `04-ux/06-settings-ia.md`, `03-runtime/22-config-sync.md`, and E2E-CONFIG-SYNC-s3-portable-configuration.** | The existing encrypted backup is useful to packaged-build users; the Experimental badge communicates its current maturity without keeping the feature hidden. |
+| D656 | Edit project can switch the primary folder | **Amend ADR 0249 §6 (ADR 0326): Edit project offers Make primary on every non-primary folder row, which moves that folder to the top, and saving submits the folder list with the primary folder first, so the host records the same root as primary. The primary row stays non-removable, so a group keeps exactly one primary folder. No IPC, RPC, storage, validation, or persisted-format change; a folder moved or deleted on disk can now be retired by promoting another folder first and removing the stale row. See `04-ux/08-component-spec.md`, `04-ux/09-interaction-patterns.md`, and issue #1535.** | A locked primary row with no promote action left a project whose primary folder was moved or deleted on disk impossible to save at all, because the main process and host-core both reject a folder that is not an existing directory. |
 
 ## B. Secondary implementation defaults
 
@@ -7615,3 +7616,20 @@ must keep splitting are covered by `markdown-blocks.test.mjs`.
   `config-sync-settings.test.mjs`, and the packaged Settings acceptance
   scenario in E2E-CONFIG-SYNC-s3-portable-configuration. See
   `04-ux/06-settings-ia.md` and `03-runtime/22-config-sync.md`.
+
+## 2026-10-11 — Edit project can switch the primary folder (D656)
+
+- Edit project offers **Make primary** on every non-primary folder row. The
+  action moves that folder to the top of the list, and saving sends the folder
+  list with the primary folder first, so the host records the same root as
+  primary without any IPC, RPC, storage, or validation change.
+- The primary row itself stays non-removable, so a group always keeps exactly
+  one primary folder. A folder that was moved or deleted on disk can now be
+  retired by promoting another folder first and then removing the stale row;
+  before this, such a project could not be saved at all, because both the main
+  process and host-core reject a folder that is not an existing directory.
+- Presentation and ordering only: stored group records, renderer metadata,
+  session paths, and on-disk folders are unchanged. Covered by
+  `apps/desktop/test/project-edit.test.mjs`, the i18n catalog parity suite, and
+  ADR 0326 (amending ADR 0249). See `04-ux/08-component-spec.md` and
+  `04-ux/09-interaction-patterns.md`; issue #1535.

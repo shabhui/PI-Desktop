@@ -249,8 +249,13 @@ may be retained while exactly one workspace supplies the visible shell context.
 - **Edit project** — the project overflow menu in the sidebar and Project
   archive opens the same editor for the selected logical project. The editor
   trims and persists a 1–80 Unicode-code-point group name and lists every
-  registered folder. The Primary folder stays first and cannot be removed;
-  additional folders can be added through the native multi-selection picker or
+  registered folder. Exactly one folder stays Primary; a non-primary row offers
+  Make primary, which promotes that folder to the top of the list, and saving
+  sends the primary folder first so the host records the same root as primary.
+  The Primary row itself cannot be removed, so switching primary is how a folder
+  is retired — including one that no longer exists on disk, which the host
+  refuses to keep in an update. Additional folders can be added through the native
+  multi-selection picker or
   removed individually. Saving updates group membership without rewriting path
   identities, workspace identity, session ownership, transcripts, or on-disk
   folders. Removing an additional folder with chats detaches it as a standalone

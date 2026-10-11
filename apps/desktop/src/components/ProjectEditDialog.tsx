@@ -144,6 +144,20 @@ export function ProjectEditDialog({
     };
   }, [onClose]);
 
+  /**
+   * Promote a folder to primary. The host keeps the primary root as the default
+   * visible workspace and takes the first folder of an update as the new
+   * primary, so the dialog mirrors that by promoting the clicked row to the top
+   * of the list.
+   */
+  const makePrimary = (path: string) => {
+    if (busyRef.current || loading) return;
+    setPrimaryPath(path);
+    setFolders((current) => [
+      path,
+      ...current.filter((item) => !samePath(item, path)),
+    ]);
+  };
   const addFolders = async () => {
     if (busyRef.current || folderPickerInFlightRef.current) return;
     folderPickerInFlightRef.current = true;
@@ -172,7 +186,14 @@ export function ProjectEditDialog({
     busyRef.current = true;
     setBusy(true);
     try {
-      const result = await api.updateProjectGroup(group.id, trimmedName, folders);
+      // The host takes the first folder of an update as the new primary root and
+      // keeps the old primary when it is still listed, so the primary folder has
+      // to lead the payload rather than stay wherever the user's picks left it.
+      const orderedFolders = [
+        primaryPath,
+        ...folders.filter((path) => !samePath(path, primaryPath)),
+      ];
+      const result = await api.updateProjectGroup(group.id, trimmedName, orderedFolders);
       onSaved(result.group);
       onClose();
     } catch (error) {
@@ -284,6 +305,18 @@ export function ProjectEditDialog({
                         key={path}
                         role="listitem"
                       >
+                        {primary ? null : (
+                          <TooltipButton
+                            type="button"
+                            className="project-create-folder-primary"
+                            tooltip={t("project.editMakePrimary")}
+                            ariaLabel={`${t("project.editMakePrimary")}: ${folderName(path)}`}
+                            disabled={loading || busy}
+                            onClick={() => makePrimary(path)}
+                          >
+                            <IconStar size={15} />
+                          </TooltipButton>
+                        )}
                         <span className="project-create-folder-icon" aria-hidden>
                           <IconFolder size={17} />
                         </span>

@@ -1704,6 +1704,7 @@ sklm: {
     editSaving: "Kaydediliyor…",
     editCancel: "İptal",
     editPrimaryLocked: "Birincil klasör kaldırılamaz",
+   editMakePrimary: "Birincil yap",
     editInstructions: "Proje talimatları",
     instructionsSaved: "Proje talimatları kaydedildi",
     editMemory: "Proje belleği",
