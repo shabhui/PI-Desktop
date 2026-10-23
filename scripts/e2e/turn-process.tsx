@@ -278,10 +278,20 @@ export async function turnProcessProbe() {
         nearLeft(leftOf(nestedLabel), leftOf(bashLabel)),
       "turn, group and run titles share one text line",
     );
+    const topProcess = topHeader?.parentElement ?? null;
     check(
-      nearLeft(leftOf(topHeader), leftOf(nestedHeader)) &&
+      topHeader !== null &&
+        topProcess !== null &&
+        Math.abs(
+          topHeader.getBoundingClientRect().width -
+            topProcess.getBoundingClientRect().width,
+        ) < 1,
+      "the turn header hairline spans the transcript band",
+    );
+    check(
+      nearLeft(leftOf(topHeader), leftOf(topIcon)) &&
         nearLeft(leftOf(nestedHeader), leftOf(bashHead)),
-      "turn, group and run header fills share one left edge",
+      "the turn row starts at the prose edge and nested fills share their gutter",
     );
     check(
       owns(topHeader, pointIn(topIcon)) &&

@@ -472,6 +472,8 @@ export const ptBR = {
     usageContextAriaRemaining: "restante",
     usageContextAriaUsed: "usado",
     usageTurnTotal: "Esta rodada",
+    usageTurnAria: "Este turno: {{speed}}, {{count}} tokens. Mostrar detalhes.",
+    usageTotal: "Total",
     usageThroughputLabel: "Velocidade de geração",
     usageThroughput: "{{count}} tokens/s",
     usageThroughputEstimated: "≈ {{count}} tokens/s",

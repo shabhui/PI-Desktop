@@ -5311,12 +5311,18 @@ must keep splitting are covered by `markdown-blocks.test.mjs`.
 
 #### E2E-060d: Assistant meta chips, compact context summary, and retry action
 
-- **Preconditions**: A completed assistant message includes modelId and token
-  usage; another completed assistant message has content but no usage. The
-  selected model has a published 1m-class context window, while its provider
-  binding still contains the legacy 128k generic seed.
+- **Preconditions**: A completed visual turn includes modelId and token usage
+  across more than one assistant message; another completed assistant message
+  has content but no usage. The selected model has a published 1m-class context
+  window, while its provider binding still contains the legacy 128k generic
+  seed.
 - **Steps**: 1) Open the session. 2) Confirm the completed turn shows a model
-  badge and no context inspector under the answer. 3) Hover the composer
+  badge and no context inspector under the answer. Confirm the turn usage
+  capsule follows the badge with its average speed and compact total, then
+  hover or keyboard-focus it and inspect the cache-read/input/output exact
+  counts, the turn total, and cache write only when non-zero. Move the pointer
+  into the popover and confirm it stays open, then dismiss it with Escape and
+  with an outside pointer press. 3) Hover the composer
   toolbar inspector trigger, confirm the panel stays closed, then click it.
   4) Inspect the remaining-token-plus-percentage heading, used/window counts,
   unboxed turn/speed values, total session duration, and three timing rows for
@@ -5338,7 +5344,15 @@ must keep splitting are covered by `markdown-blocks.test.mjs`.
   without usage still offers Retry on completed turns and omits the composer
   inspector.
 - **Expected**: Model badge appears under completed assistant answers when a
-  model id exists. The compact Context inspector appears in the composer
+  model id exists, followed immediately by the turn usage capsule when that
+  turn has usage. The capsule's speed is summed output tokens over summed
+  response duration, and its total sums input/output/cache read/cache write
+  across the visual turn, counting reasoning inside output and excluding
+  subagent spend. Its popover stays open while the pointer is over it, closes
+  on pointer leave after a grace delay unless the trigger retains keyboard
+  focus, on Escape, or on an outside press; it portals to the body, clamps to
+  the conversation pane, and is absent on streaming turns.
+  The compact Context inspector appears in the composer
   right toolbar, left of the model picker, once any usage exists, and always
   mirrors the newest usage-bearing assistant turn. The trigger shows the ring
   plus remaining-capacity percentage (no Context label) and low-space
@@ -5357,7 +5371,8 @@ must keep splitting are covered by `markdown-blocks.test.mjs`.
   explanatory estimate paragraph is rendered. Occupancy, turn total, and
   provider cache/input/output/reasoning/hit-rate are the last usage-bearing
   assistant message, not the summed tool-loop, so cache read stays on the
-  same scale as the context window. The cache hit rate is omitted
+  same scale as the context window; this last-request value remains distinct
+  from the capsule's visual-turn aggregate. The cache hit rate is omitted
   when cache-read metadata is absent rather than inferred. A published 1m-class
   limit (for example `gpt-5.6-luna` at 1,050,000 tokens) is shown instead of
   128k, the same effective window is used by the agent runtime, and a non-default
@@ -17364,7 +17379,11 @@ plugin-form fixtures in an isolated temporary directory at runtime.
   defaults to Fully folded. Confirm the header reads running, finished, stopped,
   or failed for each case, names compaction and recovery while those stages are
   live, omits the duration when none was recorded, and never repeats the current
-  command. Review the nested path, including independent group/item toggles, a
+  command. Confirm the top-level header shows exactly status, recorded duration
+  and direct tool/search count; its caret sits immediately after the tool count;
+  a hairline underlines the row; hovering changes only the text colour with no
+  background fill; and a failed turn does not add an issue count. Review the
+  nested path, including independent group/item toggles, a
   singleton segment, literal-final-item leaf selection, failure/denial/recovery,
   retained-pane remounts, run rows keeping their details closed until opened, and
   a legacy search reveal.
@@ -17393,12 +17412,15 @@ plugin-form fixtures in an isolated temporary directory at runtime.
   reports running, finished, stopped, or failed with failure and stop outranking
   a normal finish, reads `Thinking` while the live step is reasoning, names
   compaction and recovery while those stages are live, omits a duration the
-  transcript did not record, and never repeats the current command. Nested group
-  headers and run rows share the turn header's left edge. When `Show thinking` is
-  off, no completed reasoning row renders, and only the live whole-run TextShimmer
-  `Thinking` indicator remains while reasoning streams; turning it back on
-  restores the rows. No item payload opens itself except the display mode's
-  Thinking default: a tool/search row stays closed until the user opens it.
+  transcript did not record, and never repeats the current command. It carries
+  only status, duration and direct tool/search count, with the caret immediately
+  after the tool count, a hairline under the row, text-colour-only hover, and no
+  issue count. Nested group headers and run rows share the turn header's left
+  edge. When `Show thinking` is off, no completed reasoning row renders, and only
+  the live whole-run TextShimmer `Thinking` indicator remains while reasoning
+  streams; turning it back on restores the rows. No item payload opens itself
+  except the display mode's Thinking default: a tool/search row stays closed until
+  the user opens it.
   Parent/child/sibling states remain independent, pane-owned user choices survive
   updates, preference changes and remounts, and renderer restart reapplies
   defaults. Search reveals the turn process and, where one exists, the activity
@@ -17421,6 +17443,10 @@ plugin-form fixtures in an isolated temporary directory at runtime.
   viewport anchoring; `apps/desktop/test/turn-process.test.mjs` covers mode
   segmentation, `apps/desktop/test/transcript-display-modes-ui.test.mjs` covers
   the renderer's mode wiring, Thinking defaults and TextShimmer,
+  `apps/desktop/test/turn-process-header.test.mjs` covers the top-level header's
+  status/duration/tool-count composition and the absence of issue counts,
+  `apps/desktop/test/turn-process-header-style.test.mjs` covers its hairline and
+  text-only hover,
   `apps/desktop/test/transcript-display-mode-settings.test.mjs` covers the
   Settings row and search indexing, and
   `apps/desktop/test/settings-roundtrip.test.mjs` covers normalization, write
