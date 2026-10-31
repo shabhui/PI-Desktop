@@ -9,6 +9,8 @@ import {
   isImageGenerationModel,
   normalizeMode,
   trustedExtensionAgentKeyFromProviderId,
+  normalizeProviderRetryInitialDelayMs,
+  normalizeProviderRetryMaxAttempts,
   type CommandShellCatalog,
   type McpServerRecord,
   type ModelBinding,
@@ -730,6 +732,15 @@ export function createSessionLaunchRuntime({
         });
       }
     }
+    // Main resolves the launch from raw settings, so the two configured retry
+    // knobs are normalized here before they reach the sidecar: an unusable
+    // persisted value keeps the released defaults instead of poisoning launch.
+    const providerRetryMaxAttempts = normalizeProviderRetryMaxAttempts(
+      settings?.providerRetryMaxAttempts,
+    );
+    const providerRetryInitialDelayMs = normalizeProviderRetryInitialDelayMs(
+      settings?.providerRetryInitialDelayMs,
+    );
     return {
       providerId: provider.id,
       modelId,
@@ -741,6 +752,12 @@ export function createSessionLaunchRuntime({
         ...(overrides.turnId ? { turnId: overrides.turnId } : {}),
         thinkingLevel,
         infiniteProviderRetry: settings.infiniteProviderRetry === true,
+        ...(providerRetryMaxAttempts === undefined
+          ? {}
+          : { providerRetryMaxAttempts }),
+        ...(providerRetryInitialDelayMs === undefined
+          ? {}
+          : { providerRetryInitialDelayMs }),
         // The session `/fast` switch only reaches a model the user allowed it
         // for in model settings (ADR 0334).
         fastMode: session.fastMode === true && storedModel?.fastModeAllowed === true,

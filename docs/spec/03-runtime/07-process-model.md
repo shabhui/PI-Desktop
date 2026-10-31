@@ -47,9 +47,9 @@ E2E harnesses point a build at a throwaway profile with it.
 1. Electron main starts
 2. Load English locale defaults
 3. Spawn Rust host-core
-4. `app.handshake` with host-core
-5. Spawn Node pi agent sidecar
-6. Connect agent sidecar tool-bridge to host-core via main
+4. `app.handshake` with host-core, then restore authoritative network settings
+5. Spawn Node pi agent sidecar and attach its tool bridge to host-core via main
+6. Configure the sidecar against current Host/network state before publication
 7. Create main window / renderer
 8. Renderer performs `app/getVersion` healthcheck through main
 
@@ -72,20 +72,60 @@ frameless Windows/Linux window can always be closed, and quitting from it goes
 through the renderer quit channel (`pi-desktop/app/quit`), which runs the same
 ordered shutdown as the Quit menu item.
 
-After host-core is up, Electron main reads `AppSettings.networkProxy` and
-applies it before spawning the agent sidecar (D340). Chromium sessions use
-`session.setProxy`; main-process `fetch` is `net.fetch`. In System mode, the
-sidecar provider dispatcher and host-core marketplace `curl` use an
-authenticated, loopback-only SOCKS5 relay. Electron resolves each destination
-with `session.defaultSession.resolveProxy`, including PAC rules and their
-ordered fallbacks. The relay's random credential is runtime-only and is sent
-over sidecar configuration / host RPC, never through process environment.
-Custom URLs with userinfo keep credentials for Node and curl; Chromium is
-pointed at a loopback SOCKS5 relay that injects them, because `proxyRules`
-cannot carry userinfo (issue #490). host-core marketplace `curl` gets explicit
-proxy arguments and does **not** inherit proxy env, so workspace Bash cannot
-see proxy credentials. Direct mode bypasses the System relay. TLS certificate
-verification remains enabled on every route.
+After host-core is up, `bootBackends` reads authoritative
+`AppSettings.networkProxy` and `AppSettings.networkDns`, applies them and
+configures the Host relay before spawning the agent sidecar. It is the single
+startup network-restoration owner: the later renderer/bootstrap settings
+snapshot must not replay network settings. Host identity is checked after
+asynchronous setup boundaries, including settings reads and native application.
+A sidecar candidate is attached to that Host, configured, and only then
+published to runtime state. If the network snapshot changes during configuration,
+activation catches up before publication; a replaced Host/sidecar or failed
+configuration rejects and disposes the candidate, including sidecar restarts.
+
+Chromium sessions use `session.setProxy`; main-process `fetch` is `net.fetch`.
+In System mode, the sidecar provider dispatcher and host-core marketplace
+`curl` use an authenticated, loopback-only SOCKS5 relay. Electron selects each
+destination's route with `session.defaultSession.resolveProxy`, including PAC
+rules and ordered fallbacks. The random credential travels only over sidecar
+configuration / Host RPC, never through process environment. Custom URLs with
+userinfo retain credentials for Node and curl; Chromium uses the existing
+credential-injecting loopback relay because `proxyRules` cannot carry userinfo
+(issue #490). Host curl uses explicit proxy arguments, not proxy environment.
+With native DNS disabled, Direct mode continues to bypass the System relay.
+TLS certificate verification remains enabled on every route.
+
+Native DoH is an optional device-local override, off by default. Electron owns
+`app.configureHostResolver` and Chromium's cache; Node socket lookups use the
+same resolver through the authenticated relay. While DoH is enabled, Desktop
+provider and Host curl traffic require that relay in **all** proxy modes,
+including Direct. Host uses `socks5h://` plus an empty `--noproxy` value so
+environment bypasses cannot evade DNS ownership. Proxy endpoint names resolve
+locally; a proxied destination's DNS remains owned by its upstream proxy.
+The runtime-only `desktopDnsEnabled` flag defaults false for legacy/headless
+callers and must be boolean when supplied. It is neither portable settings
+data nor an environment variable. A missing required relay fails closed.
+
+Enabled DNS uses Chromium `secure`, or `automatic` only after explicit fallback
+opt-in. The default is `https://1.1.1.1/dns-query`; custom hostname endpoints
+may need system bootstrap. Initial system mode does not configure Chromium.
+Disabling an override restores `automatic`, no custom servers, and the built-in
+resolver only on macOS; it does not forcibly disable Chromium's own automatic
+DNS behavior. Effective changes serialize configuration/cache clearing. Old
+generation lookups cannot create new connections, and operations have a 10s
+deadline. Cancellation stops waiting and ignores late results rather than
+claiming to cancel Chromium's shared query. Apply failure blocks new controller
+lookups until a successful recovery. Existing connected requests are not aborted
+merely to clear caches.
+
+Settings writes apply the Host-returned merged settings, serialize runtime
+application, and reject replaced Host/sidecar identities after awaits. Storage
+precedes runtime application: a reported failure can leave the preference
+persisted, and retrying or disabling remains possible; there is no transactional
+rollback guarantee. Secure-DNS setup failure must not start a system-DNS provider
+route. Workspace Bash, external browsers, independently running headless/remote
+Hosts and separately owned pinned-DNS transports are not reconfigured.
+See [native Desktop DNS](../../adr/native-desktop-dns.md).
 
 Provider model-list and connection probes recover from Electron 43's exact
 `net::ERR_SSL_CLIENT_AUTH_CERT_NEEDED` failure with one Node HTTPS metadata

@@ -129,6 +129,10 @@ import {
   type ProposalKind,
   type SubagentPermission,
   GEN_UI_SKILL_ID,
+  normalizeProviderRetryInitialDelayMs,
+  normalizeProviderRetryMaxAttempts,
+  resolveProviderRetryPolicy,
+  type ProviderRetryPolicy,
   withoutReasoningReplayPlaceholder,
 } from "@pi-desktop/shared";
 import { createStreamCoalescer, type StreamCoalescer } from "./stream-coalescer.js";
@@ -290,8 +294,6 @@ import {
   classifyProviderError,
   createProviderRetryStream,
   delayWithAbort,
-  PROVIDER_RATE_LIMIT_MAX_RETRIES,
-  PROVIDER_TRANSIENT_MAX_RETRIES,
   carriesRetryDelayHeaders,
   isTransientProviderRetryCode,
   providerRateLimitDelayMs,
@@ -1004,6 +1006,17 @@ export type AgentRuntimeOptions = {
   thinkingLevel: SessionThinkingLevel;
   /** Persisted opt-in for retrying transient provider failures until success. */
   infiniteProviderRetry?: boolean;
+  /**
+   * Persisted retry ceiling after the initial provider request. `0` means
+   * unlimited, and `infiniteProviderRetry: true` takes precedence; absent keeps
+   * the released ten-retry budget.
+   */
+  providerRetryMaxAttempts?: number;
+  /**
+   * Persisted first wait before a retried provider request, in milliseconds.
+   * Absent keeps the released per-class schedule (2s for 429, 1s otherwise).
+   */
+  providerRetryInitialDelayMs?: number;
   /**
    * Fast mode for main turns, already resolved by the launcher from the
    * session `/fast` switch and the model binding's opt-in (ADR 0334).
@@ -2010,6 +2023,10 @@ export class DesktopAgentRuntime {
   private providerRateLimitRetryAttempt = 0;
   /** Opt-in mode removes only the retry-count ceiling; abort and backoff stay intact. */
   private infiniteProviderRetry = false;
+  /** Retry ceiling after the first request; `0` means unlimited, absence keeps the default. */
+  private providerRetryMaxAttempts?: number;
+  /** Persisted first retry wait; absent keeps the per-class released schedule. */
+  private providerRetryInitialDelayMs?: number;
   private fastMode = false;
   private jevApiKey?: string;
   private activeProviderRetryAttempt = 0;
@@ -2122,6 +2139,12 @@ export class DesktopAgentRuntime {
     this.thinkingLevel = clampThinkingLevel(opts.provider, opts.thinkingLevel);
     this.infiniteProviderRetry = opts.infiniteProviderRetry === true;
     this.fastMode = opts.fastMode === true;
+    this.providerRetryMaxAttempts = normalizeProviderRetryMaxAttempts(
+      opts.providerRetryMaxAttempts,
+    );
+    this.providerRetryInitialDelayMs = normalizeProviderRetryInitialDelayMs(
+      opts.providerRetryInitialDelayMs,
+    );
     this.jevApiKey = opts.jevApiKey;
     this.host = opts.host;
     this.batchPlanner = new BatchPlanner(this.host, this.sessionId);
@@ -2322,6 +2345,9 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
           maxTokens: clampOutputToContext(m, requestContext, hookedOptions.maxTokens),
         };
         const usageTurnId = this.turnId;
+        // Resolved once per provider call so a reused runtime picks up the
+        // persisted ceiling/wait without rebuilding the agent.
+        const providerRetryPolicy = this.providerRetryPolicy();
         const retryStream = createProviderRetryStream(
           m,
           requestContext,
@@ -2352,12 +2378,17 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
             headers: () => this.providerRetryHeaders,
             status: () => this.providerResponseStatus,
             failure: () => this.providerFetchFailure,
+            ...(providerRetryPolicy.initialDelayMs === undefined
+              ? {}
+              : { initialDelayMs: providerRetryPolicy.initialDelayMs }),
             onRetry: ({ error, attempt, delayMs }) => {
               this.setAgentActivity({
                 phase: "retrying",
                 since: Date.now(),
                 attempt,
-                ...(this.infiniteProviderRetry ? { infinite: true } : {}),
+                ...(providerRetryPolicy.unlimited
+                  ? { infinite: true }
+                  : { maxAttempts: providerRetryPolicy.maxAttempts }),
                 retryDelayMs: delayMs,
                 error: this.retryActivityError(error),
               });
@@ -2442,6 +2473,34 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
   setInfiniteProviderRetry(enabled: boolean): void {
     if (this.disposed) throw new Error("runtime disposed");
     this.infiniteProviderRetry = enabled;
+  }
+
+  /**
+   * Apply the persisted retry ceiling and first wait to a reused runtime. Both
+   * arguments are the raw settings values: `undefined` keeps the released
+   * defaults, `0` attempts means unlimited, and any unusable shape is ignored
+   * so a reused runtime never inherits an unchecked value.
+   */
+  setProviderRetryLimits(
+    maxAttempts?: number,
+    initialDelayMs?: number,
+  ): void {
+    if (this.disposed) throw new Error("runtime disposed");
+    this.providerRetryMaxAttempts = normalizeProviderRetryMaxAttempts(maxAttempts);
+    this.providerRetryInitialDelayMs =
+      normalizeProviderRetryInitialDelayMs(initialDelayMs);
+  }
+
+  /**
+   * The retry policy for the current turn. `infiniteProviderRetry` still wins
+   * over the configured ceiling; the first wait is independent of both.
+   */
+  private providerRetryPolicy(): ProviderRetryPolicy {
+    return resolveProviderRetryPolicy({
+      infiniteProviderRetry: this.infiniteProviderRetry,
+      providerRetryMaxAttempts: this.providerRetryMaxAttempts,
+      providerRetryInitialDelayMs: this.providerRetryInitialDelayMs,
+    });
   }
 
   /** Apply the session `/fast` switch to the next turn of a reused runtime. */
@@ -5120,6 +5179,8 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
             task,
             provider,
             infiniteProviderRetry: this.infiniteProviderRetry,
+            providerRetryMaxAttempts: this.providerRetryMaxAttempts,
+            providerRetryInitialDelayMs: this.providerRetryInitialDelayMs,
             thinkingLevel,
             fallbackModels: (definition.fallbackModels ?? []).map((pin) => ({
               key: subagentModelKey(pin),
@@ -6598,24 +6659,22 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
 
   /**
    * Claim a retry without exposing an intermediate error to the user. Rate
-   * limits use one shared ten-retry budget across request setup and stream
-   * recovery. Other transient failures — upstream gateway 5xx, dropped sockets,
-   * timeouts, truncated streams — share their own bounded budget across both
-   * phases, so a flapping gateway is retried instead of surfacing an error
-   * after a single attempt.
+   * limits use one shared retry budget across request setup and stream
+   * recovery; the budget is ten by default, the persisted
+   * `providerRetryMaxAttempts` overrides it, and `0` or `infiniteProviderRetry`
+   * removes only the ceiling. Other transient failures — upstream gateway 5xx,
+   * dropped sockets, timeouts, truncated streams — share their own budget
+   * across both phases, so a flapping gateway is retried instead of surfacing
+   * an error after a single attempt.
    */
   private claimProviderRetry(
     error: ReturnType<typeof classifyAgentError>,
     phase: "request" | "stream",
   ): number | undefined {
     if (!error.retriable || error.details?.origin === "local") return undefined;
-    const infinite = this.infiniteProviderRetry;
+    const { maxAttempts } = this.providerRetryPolicy();
     if (error.code === "PROVIDER_RATE_LIMITED") {
-      if (
-        !infinite &&
-        this.providerRateLimitRetryAttempt >=
-        PROVIDER_RATE_LIMIT_MAX_RETRIES
-      ) {
+      if (this.providerRateLimitRetryAttempt >= maxAttempts) {
         return undefined;
       }
       const attempt = ++this.providerRateLimitRetryAttempt;
@@ -6628,10 +6687,7 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
     // next must not multiply the budget or reset it by changing phase.
     void phase;
     if (!isTransientProviderRetryCode(error.code)) return undefined;
-    if (
-      !infinite &&
-      this.providerTransientRetryAttempt >= PROVIDER_TRANSIENT_MAX_RETRIES
-    ) {
+    if (this.providerTransientRetryAttempt >= maxAttempts) {
       return undefined;
     }
     const attempt = ++this.providerTransientRetryAttempt;
@@ -6794,25 +6850,33 @@ Do not invent objections or turn speculative risks into blockers. Stop when the 
     this.requestStartedAt = Date.now();
     this.providerRetryAbort = new AbortController();
     try {
+      const policy = this.providerRetryPolicy();
       const delayMs =
         retryError.code === "PROVIDER_RATE_LIMITED"
           ? providerRateLimitDelayMs(
               retryAttempt || this.providerRateLimitRetryAttempt,
               this.providerRetryHeaders,
+              Date.now(),
+              Math.random(),
+              { initialDelayMs: policy.initialDelayMs },
             )
-          : // The same 1s/2s/4s/8s schedule as a setup retry, so a fault that
+          : // The same per-class schedule as a setup retry, so a fault that
             // moves between phases keeps one predictable rhythm. A
             // server-stated delay still wins outright.
             providerSetupRetryDelayMs(
               retryAttempt,
               undefined,
               this.providerRetryHeaders,
+              Date.now(),
+              { initialDelayMs: policy.initialDelayMs },
             );
       this.setAgentActivity({
         phase: "retrying",
         since: Date.now(),
         attempt: retryAttempt,
-        ...(this.infiniteProviderRetry ? { infinite: true } : {}),
+        ...(policy.unlimited
+          ? { infinite: true }
+          : { maxAttempts: policy.maxAttempts }),
         retryDelayMs: delayMs,
         error: this.retryActivityError(retryError),
       });

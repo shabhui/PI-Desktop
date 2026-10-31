@@ -1,6 +1,7 @@
 import { ErrorCodes, IPC, type AgentEventEnvelope, type PlanExecutionFinishStatus, type Risk } from "@pi-desktop/shared";
 import { assertLinuxGlibcSupported } from "../linux-glibc";
 import { HostProcess } from "../host-process";
+import { currentNetworkDns } from "../network-proxy";
 import type { Logger } from "../logger";
 import type { PersistenceOutbox } from "../persistence-outbox";
 import type { PluginRuntime } from "../plugin-runtime";
@@ -395,6 +396,7 @@ export function createHostRuntime({
     await h.handshake();
     await h.call("network.configureSystemProxyRelay", {
       url: systemProxyRelayUrl,
+      desktopDnsEnabled: currentNetworkDns().mode === "doh",
     });
     logger.app("runtime", "info", "host-core handshake ok", {
       data: { generation: h.generation },

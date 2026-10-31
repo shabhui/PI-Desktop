@@ -22,6 +22,7 @@ import {
   withoutDerivedOutputLimit,
   withStreamIdleTimeout,
 } from "./provider-retry.js";
+import { PROVIDER_RETRY_MAX_TIMER_DELAY_MS } from "@pi-desktop/shared";
 import { activeNodeTransportRoute } from "./node-proxy.js";
 import { describeProviderFetchFailure } from "./provider-transport-recovery.js";
 import type { ClassifiedAgentError } from "./agent-errors.js";
@@ -1228,6 +1229,85 @@ describe("stream idle watchdog", () => {
       expect(attempts).toBe(1);
       await vi.advanceTimersByTimeAsync(600_000);
       expect(attempts).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("configured provider retry schedule", () => {
+  it("replaces the first wait of both schedules without clipping a long one", () => {
+    // 429: the configured wait replaces 2s and raises the class ceiling to
+    // itself, so a long but deliberate backoff survives its own cap.
+    expect(providerRateLimitDelayMs(1, undefined, 0, 0, { initialDelayMs: 5_000 })).toBe(5_000);
+    expect(providerRateLimitDelayMs(2, undefined, 0, 0, { initialDelayMs: 5_000 })).toBe(10_000);
+    expect(providerRateLimitDelayMs(3, undefined, 0, 0, { initialDelayMs: 5_000 })).toBe(20_000);
+    expect(providerRateLimitDelayMs(20, undefined, 0, 0, { initialDelayMs: 5_000 })).toBe(30_000);
+    expect(providerRateLimitDelayMs(1, undefined, 0, 0, { initialDelayMs: 120_000 })).toBe(120_000);
+    expect(providerRateLimitDelayMs(5, undefined, 0, 0, { initialDelayMs: 120_000 })).toBe(120_000);
+
+    // Transient: the same rule against the released 1s/8s schedule.
+    expect(providerSetupRetryDelayMs(1, undefined, undefined, 0, { initialDelayMs: 2_500 })).toBe(2_500);
+    expect(providerSetupRetryDelayMs(2, undefined, undefined, 0, { initialDelayMs: 2_500 })).toBe(5_000);
+    expect(providerSetupRetryDelayMs(3, undefined, undefined, 0, { initialDelayMs: 2_500 })).toBe(8_000);
+    expect(providerSetupRetryDelayMs(9, undefined, undefined, 0, { initialDelayMs: 20_000 })).toBe(20_000);
+  });
+
+  it("keeps retry-after authoritative and inside the released class ceiling", () => {
+    expect(providerRateLimitDelayMs(1, { "retry-after": "3" }, 0, 0, { initialDelayMs: 5_000 })).toBe(3_000);
+    expect(providerRateLimitDelayMs(1, { "retry-after": "600" }, 0, 0, { initialDelayMs: 5_000 })).toBe(30_000);
+    expect(providerSetupRetryDelayMs(1, undefined, { "retry-after": "600" }, 0, { initialDelayMs: 20_000 })).toBe(8_000);
+  });
+
+  it("treats a configured zero wait as an immediate retry", () => {
+    expect(providerRateLimitDelayMs(1, undefined, 0, 1, { initialDelayMs: 0 })).toBe(0);
+    expect(providerSetupRetryDelayMs(1, undefined, undefined, 0, { initialDelayMs: 0 })).toBe(0);
+    expect(providerSetupRetryDelayMs(9, undefined, undefined, 0, { initialDelayMs: 0 })).toBe(0);
+  });
+
+  it("waits the configured first delay before reopening the request", async () => {
+    const sleep = vi.fn(async () => undefined);
+    let attempts = 0;
+    const stream = createProviderRetryStream(
+      model,
+      context,
+      {},
+      () => {
+        attempts += 1;
+        return attempts === 1
+          ? failedStream({ errorMessage: "OpenAI API error (502): upstream failed" })
+          : successfulStream();
+      },
+      {
+        claim: (error) => (isTransientProviderRetryCode(error.code) ? 1 : undefined),
+        headers: () => undefined,
+        status: () => 502,
+        initialDelayMs: 2_500,
+        sleep,
+      },
+    );
+
+    const events: string[] = [];
+    for await (const event of stream) events.push(event.type);
+
+    expect(attempts).toBe(2);
+    expect(sleep).toHaveBeenCalledTimes(1);
+    expect(sleep).toHaveBeenNthCalledWith(1, 2_500, undefined);
+    expect(events).toEqual(["start", "done"]);
+  });
+
+  it("splits a wait past the 32-bit timer limit instead of retrying immediately", async () => {
+    vi.useFakeTimers();
+    try {
+      let settled = false;
+      const wait = delayWithAbort(PROVIDER_RETRY_MAX_TIMER_DELAY_MS + 1_000).then(() => {
+        settled = true;
+      });
+      await vi.advanceTimersByTimeAsync(PROVIDER_RETRY_MAX_TIMER_DELAY_MS - 1);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1_001);
+      await wait;
+      expect(settled).toBe(true);
     } finally {
       vi.useRealTimers();
     }

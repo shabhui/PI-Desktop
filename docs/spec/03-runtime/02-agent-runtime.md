@@ -302,9 +302,49 @@ values normalize to `false`. Read-modify-write operations on unrelated settings
 must remain valid without enabling retries; non-boolean writes stay invalid.
 Each retry is abortable and reports its current backoff through the normalized
 status event. The `retrying` activity carries the classified error code, the
-bounded/redacted provider message, and the HTTP status when known. The main
-session, builtin subagents, and plugin one-shot completions use the same
-codes, budget size, and precedence.
+bounded/redacted provider message, the HTTP status when known, and the
+effective ceiling of that failure class as `maxAttempts` — omitted when the
+ceiling is unlimited, which reports `infinite` instead. A producer that omits
+`maxAttempts` is displayed with the released ceiling of ten. The main session
+and builtin subagents use this policy; plugin one-shot completions retain their
+separately bounded defaults.
+
+The application settings `providerRetryMaxAttempts` and
+`providerRetryInitialDelayMs` tune that policy and change nothing else.
+`providerRetryMaxAttempts` is the number of retries allowed **after** the
+initial request. The 429 and non-429 transient classes have independent budgets;
+setup and stream failures share their respective class's budget, just as before.
+`0` means unlimited, and `infiniteProviderRetry: true` still takes precedence.
+`providerRetryInitialDelayMs` replaces the first wait of both exponential
+schedules, and `0` retries immediately. The cap of an overridden schedule is
+the larger of the released class cap and the configured wait, so a configured
+wait is never clipped back on the next attempt; `Retry-After` remains
+authoritative and keeps the released class cap, while the 429 jitter and the
+deterministic transient doubling are unchanged. Absent values keep the released
+numbers (ten retries; 2s/30s for rate limits, 1s/8s otherwise), so an existing
+profile needs no migration.
+
+Overrides must be nonnegative JS safe integers. A write carrying a float, a
+negative number, a numeric string, an explicit JavaScript `undefined`, or a
+number past `Number.MAX_SAFE_INTEGER` is rejected at the applicable boundary.
+An explicit `null` instead clears a stored override: host-core merges the patch
+and then removes the null field during normalization. Omission leaves an
+existing override unchanged. Renderer, Electron main and authoritative
+host-core use these same reset semantics; zero remains a real override.
+Unusable persisted or synced values normalize to absence and therefore to the
+default, so a bad value never fails a launch or forces retries. Both fields are
+portable application settings. A planned wait above the 32-bit timer limit is
+scheduled in abortable slices of at most 2 147 483 647 ms, because a single
+oversized `setTimeout` would fire effectively immediately.
+
+The policy is read when `agent.start` prepares a turn; a reused sidecar runtime
+receives the new values through its live setter, so a settings change applies to
+the next turn without restarting the agent process. Builtin subagents inherit
+the resolved policy of the session that started them, a headless launch carries
+the same two values in its payload, and one-shot completions and compaction keep
+their own separately bounded policies. The per-attempt stream idle watchdog is
+unchanged: a planned retry wait happens between attempts and is never counted as
+stream idle time.
 
 When the retry budget is exhausted, the final assistant error and lifecycle
 `error` are emitted once. Provider failures carry bounded diagnostics in
@@ -312,12 +352,14 @@ When the retry budget is exhausted, the final assistant error and lifecycle
 `providerStatus`, `providerCode`, `providerWaitMs`, `streamMs`,
 `retryAttempt`, the network diagnosis (`networkCategory`, `networkCode`,
 `networkSyscall`, `networkHost`, `networkRoute`) and the request correlation
-(`requestMessages`, `requestBytes`, `compactionGeneration`). For a persistent
-429 or non-429 transient failure,
-`retryAttempt` is `10`, derived from the exhausted error class's budget rather
-than temporary retry activity state. Credentials and unrestricted response bodies never
-enter the event or log. The active-turn status shows the remaining backoff and
-the retry budget as `Retrying in 0s · attempt 9/10` in English.
+(`requestMessages`, `requestBytes`, `compactionGeneration`). For rate-limit and
+other transient errors, `retryAttempt` records the retries already claimed for
+that error class when the count is positive, not temporary retry activity state.
+Exhausting a finite budget reports ten by default or the configured ceiling;
+unlimited mode does not introduce a synthetic ten-retry diagnostic value.
+Credentials and unrestricted response bodies never enter the event or log.
+The active-turn status shows the remaining backoff and retry budget, for example
+`Retrying in 0s · attempt 9/10` in English with the default policy.
 
 Each retry builds a new request, stream, and `AbortController`; the one piece of
 state a retry shares is the process-wide undici dispatcher. When the same origin

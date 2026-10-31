@@ -15,7 +15,6 @@ import { installGenUiProtocol } from "../gen-ui-protocol";
 import { installPluginAssetProtocol } from "../plugin-asset-protocol";
 import { installPluginRendererProtocol } from "../plugin-renderer-protocol";
 import { registerPluginSchemes } from "../plugin-schemes";
-import { applyNetworkProxyFromAppSettings } from "../network-proxy";
 import { readCloseBehavior } from "../window-preferences";
 import { createAgentHostBridge, type AgentHostBridge } from "../agent-host-bridge";
 import { createBackendRouter, type BackendRouter } from "../remote/backend-router";
@@ -336,7 +335,8 @@ export function registerApplicationStartup(deps: StartupDependencies): void {
         applyMacosWindowTranslucency(stored);
         applyPreventScreenSleep(stored);
         applyKeepAwakeWhileRunning(stored);
-        await applyNetworkProxyFromAppSettings(stored);
+        // Network settings are restored by bootBackends before sidecar startup.
+        // Do not replay this later snapshot over a concurrent settings write.
       } catch {
         // Keep the OS-locale menu until settings can be read again, while
         // retaining the historical default launcher fallback for this failure.

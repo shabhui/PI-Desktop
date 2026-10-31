@@ -2,6 +2,7 @@
 import type { CommandShellId } from "../command-shells.js";
 import type { KeybindingOverrides } from "../keyboard-shortcuts.js";
 import type { NetworkProxySettings } from "../network-proxy.js";
+import type { NetworkDnsSettings } from "../network-dns.js";
 import type { NetworkPolicySettings } from "../network-policy.js";
 import type { ContextCompactionSettings } from "./sessions.js";
 import type { Mode } from "./common.js";
@@ -56,9 +57,24 @@ export type AppSettings = {
   defaultMode: Mode;
   /**
    * Keep retryable provider/network failures retrying until the request succeeds.
-   * Absent and false use the bounded ten-retry policy.
+   * Absent and false use the configured retry budget (ten when unset).
    */
   infiniteProviderRetry?: boolean;
+  /**
+   * Retries after the initial request, counted separately for the 429 and
+   * transient classes. `0` means unlimited; `infiniteProviderRetry: true` wins.
+   * Absent keeps ten; an explicit `null` write clears the stored override.
+   * Other non-integer, negative or unsafe values are rejected on write and
+   * dropped on read.
+   */
+  providerRetryMaxAttempts?: number | null;
+  /**
+   * First wait of both exponential retry schedules, in milliseconds. `0` retries
+   * immediately. Absent keeps the released 2s (429) / 1s (transient) first
+   * waits; a configured value also raises that class's cap to at least itself.
+   * `Retry-After` stays authoritative. An explicit `null` restores the defaults.
+   */
+  providerRetryInitialDelayMs?: number | null;
   /** Allow Agent mode to call TypeSafe Jev for explicit structured classifications. */
   jevEnabled?: boolean;
   /** Prevent idle system sleep while this desktop app runs; off when absent. */
@@ -155,10 +171,12 @@ export type AppSettings = {
   pluginMarketCustomUrl?: string;
   /**
    * Outbound proxy for app-owned HTTP (D340). Absent means System: Chromium
-   * follows the OS proxy; Node sidecar traffic stays direct unless Custom
-   * is set. See `network-proxy.ts`.
+   * follows the OS proxy; Desktop Node/curl can use the authenticated native
+   * relay. See `network-proxy.ts`.
    */
   networkProxy?: NetworkProxySettings;
+  /** Desktop-local native DNS. Absent means no app override of system DNS. */
+  networkDns?: NetworkDnsSettings;
   /**
    * Trust policy for the network endpoints the user enters themselves: how a
    * user-supplied model base URL, MCP server, or market source is judged.

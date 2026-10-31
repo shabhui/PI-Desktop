@@ -30,6 +30,8 @@ export type SubagentProviderRetryState = {
   status?: number;
   failure?: ProviderFetchFailure;
   claim: (error: ClassifiedAgentError, phase: "request" | "stream") => number | undefined;
+  /** Inherited configured first retry wait; absent keeps the released schedule. */
+  initialDelayMs?: number;
 };
 
 /** Transport and credentials for one exact provider/model; replace together on fallback. */
@@ -130,6 +132,9 @@ export function subagentModelBinding(opts: {
           headers: () => retry.headers,
           status: () => retry.status,
           failure: () => retry.failure,
+          ...(retry.initialDelayMs === undefined
+            ? {}
+            : { initialDelayMs: retry.initialDelayMs }),
         },
       ), context.messages);
     },

@@ -6,7 +6,12 @@ import {
   normalizeRadialMenuPreferences,
   radialMenuWriteError,
   validateNetworkProxy,
+  normalizeNetworkDns,
+  validateNetworkDns,
   validateSpeechSettings,
+  normalizeProviderRetryInitialDelayMs,
+  normalizeProviderRetryMaxAttempts,
+  providerRetrySettingsWriteError,
   type CommandShellId,
   type ModelBinding,
   type SessionThinkingLevel,
@@ -169,8 +174,29 @@ export function createProviderCatalogRuntime({
     const value = (
       settings && typeof settings === "object" ? settings : {}
     ) as T & { defaultCommandShell?: unknown; radialMenu?: unknown };
+    const retryValue = value as T & {
+      providerRetryMaxAttempts?: unknown;
+      providerRetryInitialDelayMs?: unknown;
+    };
+    const providerRetryMaxAttempts = normalizeProviderRetryMaxAttempts(
+      retryValue.providerRetryMaxAttempts,
+    );
+    const providerRetryInitialDelayMs = normalizeProviderRetryInitialDelayMs(
+      retryValue.providerRetryInitialDelayMs,
+    );
+    const normalized = { ...(value as T) } as T & {
+      providerRetryMaxAttempts?: unknown;
+      providerRetryInitialDelayMs?: unknown;
+    };
+    // Main also reads raw stored settings, so an unusable retry knob is removed
+    // rather than forwarded as `undefined`: the renderer rejects a present but
+    // non-numeric value on the next settings write.
+    if (providerRetryMaxAttempts === undefined) delete normalized.providerRetryMaxAttempts;
+    else normalized.providerRetryMaxAttempts = providerRetryMaxAttempts;
+    if (providerRetryInitialDelayMs === undefined) delete normalized.providerRetryInitialDelayMs;
+    else normalized.providerRetryInitialDelayMs = providerRetryInitialDelayMs;
     return {
-      ...(value as T),
+      ...normalized,
       infiniteProviderRetry: (value as T & { infiniteProviderRetry?: unknown })
         .infiniteProviderRetry === true,
       keepAwakeWhileRunning: (value as T & { keepAwakeWhileRunning?: unknown })
@@ -183,6 +209,7 @@ export function createProviderCatalogRuntime({
           ? (value as T & { transcriptDisplayMode?: unknown }).transcriptDisplayMode
           : "fully-folded",
       radialMenu: normalizeRadialMenuPreferences(value.radialMenu),
+      networkDns: normalizeNetworkDns((value as T & { networkDns?: unknown }).networkDns),
       defaultCommandShell: isCommandShellId(value.defaultCommandShell)
         ? value.defaultCommandShell
         : defaultCommandShellForPlatform(process.platform),
@@ -196,11 +223,14 @@ export function createProviderCatalogRuntime({
     const value = settings as T & {
       defaultCommandShell?: unknown;
       infiniteProviderRetry?: unknown;
+      providerRetryMaxAttempts?: unknown;
+      providerRetryInitialDelayMs?: unknown;
       keepAwakeWhileRunning?: unknown;
       jevEnabled?: unknown;
       updatePreference?: unknown;
       lastNotifiedUpdateVersion?: unknown;
       networkProxy?: unknown;
+      networkDns?: unknown;
       macosWindowTranslucency?: unknown;
       transcriptDisplayMode?: unknown;
       radialMenu?: unknown;
@@ -218,6 +248,12 @@ export function createProviderCatalogRuntime({
       typeof value.infiniteProviderRetry !== "boolean"
     ) {
       throw Object.assign(new Error("infiniteProviderRetry is invalid"), {
+        errorCode: ErrorCodes.INVALID_PARAMS,
+      });
+    }
+    const providerRetryProblem = providerRetrySettingsWriteError(value);
+    if (providerRetryProblem !== undefined) {
+      throw Object.assign(new Error(providerRetryProblem), {
         errorCode: ErrorCodes.INVALID_PARAMS,
       });
     }
@@ -288,6 +324,15 @@ export function createProviderCatalogRuntime({
         });
       }
       value.networkProxy = proxy.value;
+    }
+    if (Object.prototype.hasOwnProperty.call(value, "networkDns")) {
+      const dns = validateNetworkDns(value.networkDns);
+      if (!dns.ok) {
+        throw Object.assign(new Error(dns.error), {
+          errorCode: ErrorCodes.INVALID_PARAMS,
+        });
+      }
+      value.networkDns = dns.value;
     }
     if (Object.prototype.hasOwnProperty.call(value, "speech")) {
       (value as T & { speech?: unknown }).speech = validateSpeechSettings(

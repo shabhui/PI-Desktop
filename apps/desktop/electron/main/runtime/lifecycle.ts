@@ -20,6 +20,7 @@ import type { PluginRuntime } from "../plugin-runtime";
 import type { RuntimeState } from "./context";
 import { syncPluginDisplayLocale } from "../plugin-display-locale";
 import { RuntimeSupervisor } from "@pi-desktop/host-runtime";
+import { currentNetworkDns, currentSystemProxyRelayUrl } from "../network-proxy";
 
 type RestartKind = "host" | "sidecar";
 export type RuntimeLifecycleDependencies = {
@@ -224,12 +225,24 @@ export function createRuntimeLifecycle({
     // the process answers. The startup sequence re-applies it with the stored
     // settings; this keeps a host that boots without that write honest.
     await syncPluginDisplayLocale(runtimeState.host, getDisplayLocale());
-    try {
-      const stored = await runtimeState.host!.call("settings.get");
-      await applyNetworkProxyFromAppSettings(stored);
-    } catch {
-      await applyNetworkProxyFromAppSettings({ mode: "system" });
+    const startupHost = runtimeState.host;
+    if (!startupHost) throw new Error("host unavailable during network setup");
+    const stored = await startupHost.call("settings.get");
+    if (runtimeState.host !== startupHost) throw new Error("host changed during network setup");
+    // A failed secure-DNS apply must not silently start a system-DNS sidecar.
+    await applyNetworkProxyFromAppSettings(stored);
+    if (runtimeState.host !== startupHost) throw new Error("host changed during network setup");
+    const relayUrl = currentSystemProxyRelayUrl();
+    const desktopDnsEnabled = currentNetworkDns().mode === "doh";
+    if (relayUrl) {
+      await startupHost.call("network.configureSystemProxyRelay", {
+        url: relayUrl,
+        desktopDnsEnabled,
+      });
+    } else if (desktopDnsEnabled) {
+      throw new Error("Desktop secure DNS requires an authenticated proxy relay");
     }
+    if (runtimeState.host !== startupHost) throw new Error("host changed during network setup");
     await startSidecar();
 
     // Keep plugin host services wired to live workspace / app metadata.

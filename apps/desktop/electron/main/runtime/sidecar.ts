@@ -27,7 +27,8 @@ import type { PluginRuntime } from "../plugin-runtime";
 import type { RuntimeState } from "./context";
 import type { FinishTurn } from "./plans";
 import { formatSkillToolContent, type LoadedSkillDocument } from "../skill-document";
-import { currentSystemProxyRelayUrl } from "../network-proxy";
+import { currentNetworkDns, currentSystemProxyRelayUrl } from "../network-proxy";
+import { activateSidecar } from "./sidecar-startup";
 
 export type SidecarRuntimeDependencies = {
   runtimeState: RuntimeState;
@@ -684,14 +685,11 @@ export function createSidecarRuntime({
       sendToRenderer(IPC.event.pluginChanged,{ reason: "scaffold" });
     },
   });
-  runtimeState.sidecar = s;
-  if (runtimeState.host) s.setHost(runtimeState.host);
-  await s.call("sidecar.configure", {
-    hostBinary: runtimeState.host?.binaryPath,
-    dataDir,
+  await activateSidecar(runtimeState, s, dataDir, () => ({
     networkProxy: currentNetworkProxy(),
     systemProxyRelayUrl: currentSystemProxyRelayUrl(),
-  });
+    desktopDnsEnabled: currentNetworkDns().mode === "doh",
+  }));
   logger.app("runtime", "info", "agent sidecar configured");
   };
   return { emitAgentEvent, wireSidecar, startSidecar };

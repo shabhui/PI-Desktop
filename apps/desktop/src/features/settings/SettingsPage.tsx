@@ -59,6 +59,7 @@ import {
   SettingsCard,
   SettingsRow,
 } from "./primitives";
+import { ProviderRetrySettingsRows } from "./provider-retry-settings";
 import { AgentInstructionsSection, UpdatesRow } from "./agent-sections";
 import { CloseBehaviorSection, DeveloperSection } from "./developer-sections";
 import { PluginScenicThemesDestination } from "../../components/settings/PluginScenicThemesDestination";
@@ -568,16 +569,10 @@ export function SettingsPage() {
                     onChange={() => void saveSettings({ enterToSend: !settings.enterToSend })}
                   />
                 </SettingsRow>
-                <SettingsRow
-                  title={t("settings.infiniteProviderRetry")}
-                  description={t("settings.infiniteProviderRetryDesc")}
-                >
-                  <SettingsToggle
-                    checked={settings.infiniteProviderRetry === true}
-                    label={t("settings.infiniteProviderRetry")}
-                    onChange={() => void saveSettings({ infiniteProviderRetry: settings.infiniteProviderRetry !== true })}
-                  />
-                </SettingsRow>
+                <ProviderRetrySettingsRows
+                  settings={settings}
+                  saveSettings={saveSettings}
+                />
                 <SettingsRow
                   title={t("settings.smoothStreaming")}
                   description={t("settings.smoothStreamingDesc")}

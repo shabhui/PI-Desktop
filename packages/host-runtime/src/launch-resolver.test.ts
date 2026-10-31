@@ -117,6 +117,40 @@ describe("createHeadlessLaunchResolver", () => {
     expect(launch.sidecarParams.infiniteProviderRetry).toBe(true);
   });
 
+  it("forwards the configured retry ceiling and first wait, dropping unusable values", async () => {
+    const { host } = hostWith([provider], { p1: "sk-test" });
+    const resolver = createHeadlessLaunchResolver({ getHost: () => host, dataDir: "/data", log: () => undefined });
+
+    const configured = await resolver.resolve(
+      "s1",
+      { providerId: "p1", modelId: "gpt-a" },
+      { providerRetryMaxAttempts: 3, providerRetryInitialDelayMs: 0 },
+    );
+    expect(configured.sidecarParams.providerRetryMaxAttempts).toBe(3);
+    // Zero is a real value, not an absent one: it means an immediate retry.
+    expect(configured.sidecarParams.providerRetryInitialDelayMs).toBe(0);
+
+    const unlimited = await resolver.resolve(
+      "s1",
+      { providerId: "p1", modelId: "gpt-a" },
+      { providerRetryMaxAttempts: 0 },
+    );
+    expect(unlimited.sidecarParams.providerRetryMaxAttempts).toBe(0);
+    expect("providerRetryInitialDelayMs" in unlimited.sidecarParams).toBe(false);
+
+    // A stale or hand-edited settings snapshot keeps the released defaults.
+    const invalid = await resolver.resolve(
+      "s1",
+      { providerId: "p1", modelId: "gpt-a" },
+      {
+        providerRetryMaxAttempts: -1,
+        providerRetryInitialDelayMs: "2500",
+      },
+    );
+    expect("providerRetryMaxAttempts" in invalid.sidecarParams).toBe(false);
+    expect("providerRetryInitialDelayMs" in invalid.sidecarParams).toBe(false);
+  });
+
   it("falls back to the default provider and refuses a provider without a secret", async () => {
     const { host } = hostWith([provider, { ...provider, id: "p2", name: "Other", hasSecret: false }], { p1: "sk" });
     const resolver = createHeadlessLaunchResolver({ getHost: () => host, dataDir: "/data", log: () => undefined });

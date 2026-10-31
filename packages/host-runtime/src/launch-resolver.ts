@@ -8,6 +8,8 @@ import {
   isCommandShellCatalog,
   normalizeMode,
   resolveBindingLimits,
+  normalizeProviderRetryInitialDelayMs,
+  normalizeProviderRetryMaxAttempts,
   trustedExtensionAgentKeyFromProviderId,
   type CommandShellCatalog,
   type ModelBinding,
@@ -364,6 +366,14 @@ export function createHeadlessLaunchResolver(options: HeadlessLaunchResolverOpti
       log("warn", "subagent definitions have problems", { sessionId, diagnostics: subagentDiagnostics });
     }
 
+    // A headless launch reads the same raw settings snapshot as the desktop, so
+    // the configured retry knobs are normalized before they reach the sidecar.
+    const providerRetryMaxAttempts = normalizeProviderRetryMaxAttempts(
+      settings.providerRetryMaxAttempts,
+    );
+    const providerRetryInitialDelayMs = normalizeProviderRetryInitialDelayMs(
+      settings.providerRetryInitialDelayMs,
+    );
     const sessionMode = typeof session.mode === "string" ? session.mode : undefined;
     const defaultMode = typeof settings.defaultMode === "string" ? settings.defaultMode : undefined;
     return {
@@ -376,6 +386,12 @@ export function createHeadlessLaunchResolver(options: HeadlessLaunchResolverOpti
         ...(overrides.turnId ? { turnId: overrides.turnId } : {}),
         thinkingLevel,
         infiniteProviderRetry: settings.infiniteProviderRetry === true,
+        ...(providerRetryMaxAttempts === undefined
+          ? {}
+          : { providerRetryMaxAttempts }),
+        ...(providerRetryInitialDelayMs === undefined
+          ? {}
+          : { providerRetryInitialDelayMs }),
         commandShell,
         scratchDir: join(dataDir, "scratch", sessionId),
         attachmentsDir: join(dataDir, "attachments"),

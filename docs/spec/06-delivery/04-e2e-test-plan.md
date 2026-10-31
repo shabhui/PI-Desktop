@@ -57,6 +57,116 @@
   rate-limit retries and exhaustion after eleven genuinely stalled attempts.
 - **Specs:** `03-runtime/02-agent-runtime.md` provider retry behavior.
 
+### E2E-PROVIDER-configurable-retry
+
+- **Entry:** Build shared, then run
+  `node --test --test-concurrency=1 apps/desktop/test/provider-retry-settings-user-path.test.mjs apps/desktop/test/settings-roundtrip.test.mjs`.
+  Run shared `provider-retry.test.ts`, agent-runtime `provider-retry.test.ts`,
+  `runtime.test.ts`, `subagent.test.ts`, and host-runtime `launch-resolver.test.ts`
+  for the execution/launch contract. Retain the retry-idle process suite above.
+- **Sequence:** Open the real AI settings rows; verify unset fields are blank,
+  save count and wait by blur/Enter, save zero, reject invalid numeric input,
+  clear both saved overrides, simulate a rejected save, toggle unlimited retry,
+  and remount from persisted fixture settings. A native browser invalid number
+  draft (`value: ""`, `validity.badInput`) must not be mistaken for a reset.
+  Call the real transcript label consumer with configured, legacy and unlimited
+  retry activities; verify the effective ceiling and a countdown bounded at zero.
+- **Expected:** Zero remains unlimited/immediate; omission leaves a stored value
+  unchanged, explicit null resets it, and an already-empty unset field does not
+  write. Failed saves restore the prior display. Settings apply on the next turn,
+  including reused runtimes and builtin subagents. 429/transient budgets remain
+  independent, setup/stream share each class's budget, and a completed response
+  replenishes them without replaying tools. Stop, partial-response safety,
+  Retry-After precedence, large abortable waits and default schedules remain.
+- **Boundaries:** Isolated Electron runs the real rows and store toast action
+  with fixture-owned persistence; roundtrip tests run real renderer/main/preload
+  validators. Runtime tests use controlled provider boundaries. Host retry
+  validation/reset and portable config-sync tests remain separate Rust gates;
+  this UI fixture does not prove a rebuilt Host or packaged persistence journey.
+
+### E2E-NETWORK-native-dns
+
+- **Entry:** After building shared, agent-runtime and host-runtime, run
+  `node --test --test-concurrency=1 apps/desktop/test/network-dns-native.test.mjs apps/desktop/test/network-dns-settings-user-path.test.mjs apps/desktop/test/network-dns.test.mjs apps/desktop/test/network-settings-ipc.test.mjs apps/desktop/test/network-runtime-startup.test.mjs apps/desktop/test/network-sidecar-rpc.test.mjs`.
+- **Native sequence:** Use an isolated Electron profile, two loopback RFC 8484
+  HTTPS resolvers and a loopback HTTP target. Resolve `pi-doh-target.invalid`,
+  request it through the real authenticated relay/provider dispatcher in System
+  and Custom modes, switch the resolver, disable DoH, and test an unreachable
+  strict resolver. Preserve the target Host header. Disabling uses an
+  instrumented system-lookup sentinel, not a live external DNS service.
+- **UI/settings sequence:** Default off; enable, save the endpoint, reject an
+  invalid endpoint, opt into fallback, disable with an invalid draft, restore
+  retained preferences, reset a blank endpoint and expose save failures. Apply
+  authoritative merged writes in order. Replace Host/sidecar at each async
+  boundary; reject stale application. Configure candidates before publication,
+  catch up newer network settings, dispose failures, and prevent later UI
+  bootstrap from replaying a stale network snapshot.
+- **Expected:** Strict mode never silently falls back. Required-relay failure
+  blocks provider admission; invalid runtime DNS flags reject with INVALID_PARAMS.
+  Effective changes clear caches, stale queries cannot create a new connection,
+  cancellation/timeout/disposal ignore late results, and successful retry or
+  disabling recovers after failure. Disabled preferences preserve OS defaults.
+- **Boundaries:** The native fixture uses real Chromium APIs and only a
+  process-local fixture-certificate SPKI pin; global certificate bypass and
+  `host-resolver-rules` are forbidden. UI IPC/persistence and startup Host/process
+  boundaries are faked. The RPC test runs a real built sidecar but no provider
+  turn. Unit tests cover restoration for Windows/Linux/macOS; record the actual
+  native platform separately. Host `network_dns`, `network_proxy`, settings and
+  config-sync tests, plus rebuilt Host persistence/restart and packaged acceptance,
+  remain separate required gates. Never use a running user client or paid provider.
+- **Evidence:** Record Task candidate, Base main, suites, result and environment.
+  Uncommitted candidates need a source fingerprint; older builds, mocks and
+  another platform's native run are not proof of the current executable state.
+
+### E2E-NETWORK-host-settings-restart-sync
+
+- **Entry:** Build shared and the candidate Host, then run
+  `PI_DESKTOP_HOST_BIN=<candidate-binary> node scripts/e2e-native-network-settings.mjs`.
+  The explicit binary must exist; no fallback to an older build is allowed.
+  `PI_DESKTOP_E2E_BASE_REF` optionally selects the main reference (default
+  `origin/main`); it must be an ancestor of the task candidate.
+- **Sequence:** Start two real stdio Hosts with disposable HOME/data directories.
+  Save retry overrides and DoH preferences, update an unrelated setting, reject
+  invalid partial writes without mutation, clear each override with null, and
+  persist zero plus disabled/enabled DNS across process restarts. Connect only
+  application preferences to a loopback SigV4-validating S3 fixture. Require an
+  explicit remote-preference choice on the new device; before approval, its
+  overrides must remain unset. Synchronize custom values, zero and resets in
+  both directions, then restart both devices and disconnect.
+- **Expected:** Omission preserves values; null removes an override; zero is
+  retained. Retry preferences are portable, while each device retains its own
+  DNS mode, endpoint and fallback preference. Invalid writes never partially
+  persist. S3 payloads are encrypted, signatures validate, disconnect leaves
+  remote data intact, and fixture cleanup happens only after both Hosts stop.
+- **Boundaries/evidence:** Real Rust RPC, SQLite, restart and sync; local S3 only,
+  no provider, user profile or Desktop process. Record candidate/base, source
+  fingerprint for uncommitted work, Host SHA-256, platform and completed steps.
+  This does not replace native Chromium DNS or packaged-executable acceptance.
+
+### E2E-NETWORK-packaged-windows-zip
+
+- **Entry:** Build the candidate's release Host, runtime bundle and Desktop, then
+  package Windows x64 ZIP with `--publish never` and `piDistribution=zip`.
+  Extract that ZIP and run
+  `node scripts/e2e-packaged-network.mjs --package-dir <extracted-windows-zip>`.
+- **Sequence:** Match package Host/sidecar hashes and ASAR Main/preloads to the
+  current build. Launch the packaged executable, not development Electron, with
+  two fixture-owned profiles: strict loopback DoH plus custom retries, and
+  disabled DNS with retained endpoint plus zero retries/delay. Clear inherited
+  Host/runtime overrides; use the package's own resources. Each boot runs the
+  existing sandboxed preload/IPC, Ctrl+R and 800-session responsiveness probe.
+  Require real sidecar configuration and no backend startup/crash event, then
+  reopen each database through the packaged Host and verify retained settings.
+- **Expected:** Current resources boot with both DNS modes, retry zero/custom
+  values remain persisted, and ZIP distribution metadata selects the existing
+  manual-update default. Only fixture processes/profiles are cleaned up; raw
+  logs and hashes remain under the session scratch directory.
+- **Boundaries:** Windows ZIP startup/persistence, not NSIS installation,
+  signing, updater delivery or native macOS/Linux acceptance. The loopback DoH
+  endpoint is intentionally unavailable: this proves secure-mode startup, not
+  successful resolution. The separate native-DNS fixture proves resolution and
+  strict failure. Do not launch or modify an installed user client/profile.
+
 ### E2E-TRANSCRIPT-scroll-interruption
 
 - **Preconditions:** Real Chromium with the production transcript scroll hook;
@@ -7813,8 +7923,8 @@ must keep splitting are covered by `markdown-blocks.test.mjs`.
 
 #### E2E-096: Recover transient provider stream failures in place
 
-- **Preconditions**: A project-bound Agent session uses a deterministic
-  provider fixture that emits a partial assistant stream, terminates once, then
+- **Preconditions**: Retry-count and initial-wait overrides are unset. A
+  project-bound Agent session uses a deterministic provider fixture that emits a partial assistant stream, terminates once, then
   succeeds on the next request; a second fixture run can terminate eleven times; a
   third fixture returns `OpenAI API error (502)` before headers on one attempt
   and mid-stream on the next; a fourth fixture returns eleven consecutive 502s; a
@@ -14498,9 +14608,9 @@ are withdrawn with ADR 0165.
      TCP chunk. Confirm a subsequent marketplace refresh and a models.dev
      catalog refresh use the proxy (host-core curl `--proxy`, Electron
      `net.fetch`), and confirm a loopback URL in Bypass is not proxied.
-  6. Switch to Direct. Confirm Chromium returns to `mode: "direct"`, provider
-     and marketplace traffic bypass the System relay, and workspace Bash does
-     not inherit proxy variables from the setting.
+  6. With native DNS disabled, switch to Direct. Confirm Chromium returns to
+     `mode: "direct"`, provider and marketplace traffic bypass the System relay,
+     and workspace Bash does not inherit proxy variables from the setting.
   7. Switch to System. Confirm Chromium returns to `mode: "system"` and send a
      provider request and marketplace refresh. Confirm both follow the OS/PAC
      route selected for each destination, including ordered proxy-to-direct

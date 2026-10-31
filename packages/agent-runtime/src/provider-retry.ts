@@ -9,7 +9,12 @@ import {
   type Model,
   type SimpleStreamOptions,
 } from "@earendil-works/pi-ai";
-import { PROVIDER_RETRY_MAX_RETRIES } from "@pi-desktop/shared";
+import {
+  PROVIDER_RETRY_MAX_RETRIES,
+  providerRetryBackoffMs,
+  providerRetryDelayCapMs,
+  retryWaitSlices,
+} from "@pi-desktop/shared";
 import {
   classifyAgentError,
   type ClassifiedAgentError,
@@ -146,6 +151,8 @@ export type ProviderRetryController = {
     attempt: number;
     delayMs: number;
   }) => void;
+  /** Configured first wait for this launch; absent keeps the released schedule. */
+  initialDelayMs?: number;
   /** Test hook; production uses the abortable timer below. */
   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
 };
@@ -229,6 +236,16 @@ function serverRetryDelayMs(
 }
 
 /**
+ * Configured overrides for one backoff schedule. `initialDelayMs` replaces the
+ * released first wait and raises that class's ceiling to at least itself, so a
+ * configured wait is never clipped back to the old cap. Header-driven
+ * `Retry-After` values keep the released class ceiling.
+ */
+export type ProviderRetryDelayOptions = {
+  initialDelayMs?: number;
+};
+
+/**
  * OpenCode's order of precedence: provider milliseconds, Retry-After seconds,
  * HTTP-date, then exponential backoff with positive jitter. Header values are
  * capped so a bad or stale server response cannot hold a turn indefinitely.
@@ -238,6 +255,7 @@ export function providerRateLimitDelayMs(
   headers?: Readonly<Record<string, string>>,
   now = Date.now(),
   random = Math.random(),
+  configured?: ProviderRetryDelayOptions,
 ): number {
   const serverDelay = serverRetryDelayMs(
     headers,
@@ -246,13 +264,15 @@ export function providerRateLimitDelayMs(
   );
   if (serverDelay !== undefined) return serverDelay;
 
-  const safeAttempt = Math.max(1, Math.floor(attempt));
-  const base = PROVIDER_RATE_LIMIT_INITIAL_DELAY_MS * 2 ** (safeAttempt - 1);
-  const jitter = Math.min(1, Math.max(0, random));
-  return Math.min(
+  const initialDelayMs =
+    configured?.initialDelayMs ?? PROVIDER_RATE_LIMIT_INITIAL_DELAY_MS;
+  const capMs = providerRetryDelayCapMs(
     PROVIDER_RATE_LIMIT_MAX_DELAY_MS,
-    Math.ceil(base + base * PROVIDER_RATE_LIMIT_JITTER_FACTOR * jitter),
+    configured?.initialDelayMs,
   );
+  const base = providerRetryBackoffMs(initialDelayMs, attempt, capMs);
+  const jitter = Math.min(1, Math.max(0, random));
+  return Math.min(capMs, Math.ceil(base + base * PROVIDER_RATE_LIMIT_JITTER_FACTOR * jitter));
 }
 
 /**
@@ -270,6 +290,7 @@ export function providerSetupRetryDelayMs(
   random?: number,
   headers?: Readonly<Record<string, string>>,
   now = Date.now(),
+  configured?: ProviderRetryDelayOptions,
 ): number {
   void random;
   const serverDelay = serverRetryDelayMs(
@@ -280,19 +301,41 @@ export function providerSetupRetryDelayMs(
   // A server-stated delay wins outright, including one shorter than the
   // caller's floor: the gateway knows when it will be ready again.
   if (serverDelay !== undefined) return serverDelay;
-  const safeAttempt = Math.max(1, Math.floor(attempt));
-  const base = PROVIDER_SETUP_RETRY_INITIAL_DELAY_MS * 2 ** (safeAttempt - 1);
-  return Math.min(PROVIDER_SETUP_MAX_RETRY_DELAY_MS, base);
+  const initialDelayMs =
+    configured?.initialDelayMs ?? PROVIDER_SETUP_RETRY_INITIAL_DELAY_MS;
+  return providerRetryBackoffMs(
+    initialDelayMs,
+    attempt,
+    providerRetryDelayCapMs(PROVIDER_SETUP_MAX_RETRY_DELAY_MS, configured?.initialDelayMs),
+  );
 }
 
 function requestAbortedError(): Error {
   return Object.assign(new Error("Request aborted"), { name: "AbortError" });
 }
 
+/**
+ * Sleep one planned retry wait, cancelled by `signal`.
+ *
+ * A configured first wait may legitimately exceed the 32-bit timer limit (a
+ * day or more), and `setTimeout` clamps such a value to zero — which would turn
+ * a long backoff into an immediate retry. The wait is therefore walked in
+ * timer-safe slices from `retryWaitSlices`, each one abortable, so Stop and
+ * dispose stay responsive and the total wait is the value the policy planned.
+ */
 export function delayWithAbort(
   ms: number,
   signal?: AbortSignal,
 ): Promise<void> {
+  const slices = retryWaitSlices(ms);
+  return (async () => {
+    for (const slice of slices) {
+      await waitOneSlice(slice, signal);
+    }
+  })();
+}
+
+function waitOneSlice(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
       reject(requestAbortedError());
@@ -511,11 +554,16 @@ export function createProviderRetryStream(
           ? providerRateLimitDelayMs(
               retry.attempt,
               controller.headers(),
+              Date.now(),
+              Math.random(),
+              { initialDelayMs: controller.initialDelayMs },
             )
           : providerSetupRetryDelayMs(
               retry.attempt,
               undefined,
               controller.headers(),
+              Date.now(),
+              { initialDelayMs: controller.initialDelayMs },
             );
       controller.onRetry?.({
         error: retry.error,

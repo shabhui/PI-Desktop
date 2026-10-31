@@ -817,6 +817,21 @@ fn drop_session_side_data(st: &AppState, id: &str) {
 const DEFAULT_LARGE_PASTE_THRESHOLD: i64 = 600;
 const MIN_LARGE_PASTE_THRESHOLD: i64 = 1;
 const MAX_LARGE_PASTE_THRESHOLD: i64 = 1_000_000;
+/// Largest integer JavaScript represents exactly. The two provider retry knobs
+/// cross the renderer boundary as `number`s, so host-core rejects anything a
+/// renderer could not round-trip instead of storing a value the runtime would
+/// silently normalize away.
+const PROVIDER_RETRY_MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+/// The persisted provider retry knobs: a nonnegative JS safe integer count and
+/// first wait in milliseconds. Both are optional; absence keeps the released
+/// runtime defaults.
+const PROVIDER_RETRY_FIELDS: [&str; 2] =
+    ["providerRetryMaxAttempts", "providerRetryInitialDelayMs"];
+fn provider_retry_limit(value: &Value) -> Option<u64> {
+    value
+        .as_u64()
+        .filter(|limit| *limit <= PROVIDER_RETRY_MAX_SAFE_INTEGER)
+}
 /// Upper bound for a legacy prompt-enhancement template, in characters. The
 /// setting remains validated while older profiles and config-sync backups can
 /// still contain it for the optional plugin's one-time migration.
@@ -925,6 +940,17 @@ fn normalize_settings_value(mut value: Value) -> Value {
         };
         if unusable_template {
             object.remove(template_field);
+        }
+        // An unreadable retry knob is dropped rather than rewritten, so the
+        // runtime falls back to the released default and the renderer never
+        // shows a ceiling the host would refuse to save again.
+        for field in PROVIDER_RETRY_FIELDS {
+            let unusable = object
+                .get(field)
+                .is_some_and(|stored| provider_retry_limit(stored).is_none());
+            if unusable {
+                object.remove(field);
+            }
         }
     }
     value
@@ -1149,6 +1175,21 @@ fn validate_settings_value(value: &Value) -> Result<(), JsonRpcError> {
             ));
         }
     }
+    // Both knobs are nonnegative JS safe integers; `0` is meaningful for each
+    // (`0` retries = unlimited, `0` ms = immediate), so only a shape the
+    // renderer cannot represent is refused.
+    for field in PROVIDER_RETRY_FIELDS {
+        let Some(limit) = object.get(field) else {
+            continue;
+        };
+        if !limit.is_null() && provider_retry_limit(limit).is_none() {
+            return Err(rpc_err(
+                1002,
+                format!("{field} must be a nonnegative safe integer"),
+                "INVALID_PARAMS",
+            ));
+        }
+    }
     if let Some(keep_awake) = object.get("keepAwakeWhileRunning") {
         if !keep_awake.is_boolean() {
             return Err(rpc_err(
@@ -1177,6 +1218,9 @@ fn validate_settings_value(value: &Value) -> Result<(), JsonRpcError> {
         }
     }
     if let Err(message) = crate::network_proxy::validate_network_proxy(value) {
+        return Err(rpc_err(1002, message, "INVALID_PARAMS"));
+    }
+    if let Err(message) = crate::network_dns::validate_network_dns(value) {
         return Err(rpc_err(1002, message, "INVALID_PARAMS"));
     }
     let Some(shell_value) = object.get("defaultCommandShell") else {
@@ -5596,7 +5640,9 @@ async fn handle_request(
                 .get("url")
                 .and_then(Value::as_str)
                 .ok_or_else(|| rpc_err(1002, "url required", "INVALID_PARAMS"))?;
-            crate::network_proxy::set_system_proxy_relay(url)
+            let dns_enabled = crate::network_dns::desktop_dns_enabled(&params)
+                .map_err(|message| rpc_err(1002, message, "INVALID_PARAMS"))?;
+            crate::network_proxy::set_system_proxy_relay(url, dns_enabled)
                 .map_err(|message| rpc_err(1002, message, "INVALID_PARAMS"))?;
             Ok(json!({ "ok": true }))
         }
@@ -10943,6 +10989,81 @@ mod image_generation_settings_tests {
         ] {
             assert!(validate_settings_value(&json!({"imageGenerationModels": value})).is_err());
         }
+    }
+}
+
+/// The two provider retry knobs are shared with the renderer as JS `number`s,
+/// so host-core accepts exactly the shapes that survive that round-trip and
+/// drops anything else from a stored profile instead of trusting it.
+#[cfg(test)]
+mod provider_retry_settings_tests {
+    use super::*;
+
+    #[test]
+    fn accepts_nonnegative_safe_integers_and_rejects_every_other_shape() {
+        for value in [
+            json!({}),
+            json!({"providerRetryMaxAttempts": 0}),
+            json!({"providerRetryMaxAttempts": 3}),
+            json!({"providerRetryMaxAttempts": 9_007_199_254_740_991u64}),
+            json!({"providerRetryInitialDelayMs": 0}),
+            json!({"providerRetryInitialDelayMs": 2_500}),
+            json!({"providerRetryInitialDelayMs": 9_007_199_254_740_991u64}),
+            json!({"providerRetryMaxAttempts": null, "providerRetryInitialDelayMs": null}),
+        ] {
+            assert!(validate_settings_value(&value).is_ok(), "{value}");
+        }
+        for value in [
+            json!({"providerRetryMaxAttempts": -1}),
+            json!({"providerRetryMaxAttempts": 1.5}),
+            json!({"providerRetryMaxAttempts": "3"}),
+            json!({"providerRetryMaxAttempts": true}),
+            json!({"providerRetryMaxAttempts": 9_007_199_254_740_992u64}),
+            json!({"providerRetryInitialDelayMs": -1}),
+            json!({"providerRetryInitialDelayMs": 0.5}),
+            json!({"providerRetryInitialDelayMs": "1000"}),
+            json!({"providerRetryInitialDelayMs": 9_007_199_254_740_992u64}),
+        ] {
+            let error = validate_settings_value(&value).expect_err(&value.to_string());
+            assert_eq!(error.data.unwrap()["errorCode"], "INVALID_PARAMS");
+        }
+    }
+
+    #[test]
+    fn normalize_drops_unusable_persisted_knobs_and_keeps_valid_ones() {
+        let normalized = normalize_settings_value(json!({
+            "providerRetryMaxAttempts": 4,
+            "providerRetryInitialDelayMs": -5,
+            "theme": "dark",
+        }));
+        assert_eq!(normalized["providerRetryMaxAttempts"], 4);
+        assert!(normalized.get("providerRetryInitialDelayMs").is_none());
+        assert_eq!(normalized["theme"], "dark");
+
+        let normalized = normalize_settings_value(json!({
+            "providerRetryMaxAttempts": "many",
+            "providerRetryInitialDelayMs": 0,
+        }));
+        assert!(normalized.get("providerRetryMaxAttempts").is_none());
+        assert_eq!(normalized["providerRetryInitialDelayMs"], 0);
+    }
+
+    #[test]
+    fn explicit_null_resets_retry_overrides_after_the_settings_merge() {
+        let patch = json!({
+            "providerRetryMaxAttempts": null,
+            "providerRetryInitialDelayMs": null,
+        });
+        assert!(validate_settings_value(&patch).is_ok());
+        let stored = Some(json!({
+            "providerRetryMaxAttempts": 0,
+            "providerRetryInitialDelayMs": 0,
+            "theme": "dark",
+        }));
+        let normalized = normalize_settings_value(merge_settings_value(stored, patch));
+        assert!(normalized.get("providerRetryMaxAttempts").is_none());
+        assert!(normalized.get("providerRetryInitialDelayMs").is_none());
+        assert_eq!(normalized["theme"], "dark");
     }
 }
 

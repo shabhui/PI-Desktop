@@ -163,6 +163,7 @@ import {
   normalizeLargePasteThreshold,
   normalizeMode,
   normalizeNetworkProxy,
+  normalizeNetworkDns,
   normalizeNetworkPolicy,
   normalizeRadialMenuPreferences,
   radialMenuWriteError,
@@ -170,8 +171,12 @@ import {
   normalizeChatContentMaxWidth,
   validateNetworkPolicy,
   validateNetworkProxy,
+  validateNetworkDns,
   validateSpeechSettings,
   JEV_API_KEY_SECRET_REF,
+  normalizeProviderRetryInitialDelayMs,
+  normalizeProviderRetryMaxAttempts,
+  providerRetrySettingsWriteError,
 } from "@pi-desktop/shared";
 
 export type ImportSource = "claude-code" | "opencode" | "codex" | "pi";
@@ -429,8 +434,22 @@ function isTranscriptDisplayModeValue(value: unknown): value is TranscriptDispla
 }
 
 export function normalizeSettings(settings: AppSettings): AppSettings {
+  // An unusable configured retry knob is dropped from the object instead of
+  // being kept as `undefined`: a present-but-invalid property would be
+  // rejected by `validateSettingsWrite` on the next unrelated save.
+  const normalized: AppSettings = { ...settings };
+  const providerRetryMaxAttempts = normalizeProviderRetryMaxAttempts(
+    (settings as { providerRetryMaxAttempts?: unknown }).providerRetryMaxAttempts,
+  );
+  const providerRetryInitialDelayMs = normalizeProviderRetryInitialDelayMs(
+    (settings as { providerRetryInitialDelayMs?: unknown }).providerRetryInitialDelayMs,
+  );
+  if (providerRetryMaxAttempts === undefined) delete normalized.providerRetryMaxAttempts;
+  else normalized.providerRetryMaxAttempts = providerRetryMaxAttempts;
+  if (providerRetryInitialDelayMs === undefined) delete normalized.providerRetryInitialDelayMs;
+  else normalized.providerRetryInitialDelayMs = providerRetryInitialDelayMs;
   return {
-    ...settings,
+    ...normalized,
     sidebarRunningIndicators: settings.sidebarRunningIndicators !== false,
     sidebarRunningBadge: settings.sidebarRunningBadge !== false,
     sidebarRunningRail: settings.sidebarRunningRail === true,
@@ -456,6 +475,7 @@ export function normalizeSettings(settings: AppSettings): AppSettings {
     networkProxy: normalizeNetworkProxy(
       (settings as { networkProxy?: unknown }).networkProxy,
     ),
+    networkDns: normalizeNetworkDns((settings as { networkDns?: unknown }).networkDns),
     networkPolicy: normalizeNetworkPolicy(
       (settings as { networkPolicy?: unknown }).networkPolicy,
     ),
@@ -500,6 +520,8 @@ export function validateSettingsWrite(settings: AppSettings): AppSettings {
     fontScale?: unknown;
     chatContentMaxWidth?: unknown;
     infiniteProviderRetry?: unknown;
+    providerRetryMaxAttempts?: unknown;
+    providerRetryInitialDelayMs?: unknown;
     jevEnabled?: unknown;
     smoothStreaming?: unknown;
     sidebarRunningIndicators?: unknown;
@@ -509,6 +531,7 @@ export function validateSettingsWrite(settings: AppSettings): AppSettings {
     updatePreference?: unknown;
     lastNotifiedUpdateVersion?: unknown;
     networkProxy?: unknown;
+    networkDns?: unknown;
     networkPolicy?: unknown;
   };
   if (
@@ -549,6 +572,12 @@ export function validateSettingsWrite(settings: AppSettings): AppSettings {
     typeof value.infiniteProviderRetry !== "boolean"
   ) {
     throw Object.assign(new Error("infiniteProviderRetry is invalid"), {
+      errorCode: "INVALID_PARAMS",
+    });
+  }
+  const providerRetryProblem = providerRetrySettingsWriteError(value);
+  if (providerRetryProblem !== undefined) {
+    throw Object.assign(new Error(providerRetryProblem), {
       errorCode: "INVALID_PARAMS",
     });
   }
@@ -620,6 +649,15 @@ export function validateSettingsWrite(settings: AppSettings): AppSettings {
       });
     }
     value.networkProxy = proxy.value;
+  }
+  if (Object.prototype.hasOwnProperty.call(value, "networkDns")) {
+    const dns = validateNetworkDns(value.networkDns);
+    if (!dns.ok) {
+      throw Object.assign(new Error(dns.error), {
+        errorCode: "INVALID_PARAMS",
+      });
+    }
+    value.networkDns = dns.value;
   }
   if (Object.prototype.hasOwnProperty.call(value, "networkPolicy")) {
     const policy = validateNetworkPolicy(value.networkPolicy);

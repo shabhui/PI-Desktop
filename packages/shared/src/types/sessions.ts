@@ -216,6 +216,11 @@ export type AgentActivity =
       attempt: number;
       /** The retry budget is unbounded for this active turn. */
       infinite?: boolean;
+      /**
+       * Retries allowed after the initial request when the budget is bounded;
+       * absent (an older runtime) falls back to the released ten.
+       */
+      maxAttempts?: number;
       retryDelayMs?: number;
       error?: AgentActivityError;
     }

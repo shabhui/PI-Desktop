@@ -36,6 +36,8 @@ import {
   normalizeNetworkProxy,
   OAUTH_AUTH_KIND,
   readNdjsonLines,
+  normalizeProviderRetryInitialDelayMs,
+  normalizeProviderRetryMaxAttempts,
 } from "@pi-desktop/shared";
 import type {
   AgentEventEnvelope,
@@ -111,6 +113,10 @@ type RuntimeParams = {
   turnId?: string;
   thinkingLevel?: SessionThinkingLevel;
   infiniteProviderRetry?: boolean;
+  /** Retries after the initial request; `0` means unlimited. */
+  providerRetryMaxAttempts?: number;
+  /** First wait of both backoff schedules, in milliseconds. */
+  providerRetryInitialDelayMs?: number;
   /** Session `/fast` switch AND the model's opt-in, resolved by main (ADR 0334). */
   fastMode?: boolean;
   /** Opt-in TypeSafe classifier credential resolved by Electron main. */
@@ -208,6 +214,15 @@ async function runtimeFor(
   const trustedExtensions = params.trustedExtensions ?? [];
   const subagents = params.subagents ?? [];
   const subagentModelKeys = params.subagentModelKeys ?? [];
+  // A launch payload can cross a process boundary written by another build, so
+  // the configured retry knobs are normalized here too: an unusable value keeps
+  // the released defaults instead of reaching the retry loop.
+  const providerRetryMaxAttempts = normalizeProviderRetryMaxAttempts(
+    params.providerRetryMaxAttempts,
+  );
+  const providerRetryInitialDelayMs = normalizeProviderRetryInitialDelayMs(
+    params.providerRetryInitialDelayMs,
+  );
   const subagentProviders = Object.fromEntries(
     Object.entries(params.subagentProviders ?? {}).map(([key, pinned]) => [
       key,
@@ -262,6 +277,9 @@ async function runtimeFor(
     reusable.setPluginSkills(pluginSkills);
     reusable.setCompactionSettings(params.compactionSettings);
     reusable.setInfiniteProviderRetry(params.infiniteProviderRetry === true);
+    // A reused runtime must pick up the configured budget and first wait, so a
+    // settings change applies at the next `agent.start`.
+    reusable.setProviderRetryLimits(providerRetryMaxAttempts, providerRetryInitialDelayMs);
     reusable.setFastMode(params.fastMode === true);
     reusable.setMode(mode);
     return reusable;
@@ -310,6 +328,8 @@ async function runtimeFor(
     commandShell: params.commandShell,
     thinkingLevel,
     infiniteProviderRetry: params.infiniteProviderRetry === true,
+    providerRetryMaxAttempts,
+    providerRetryInitialDelayMs,
     fastMode: params.fastMode === true,
     jevApiKey: params.jevApiKey,
     history,
@@ -395,13 +415,20 @@ async function handle(method: string, params: any): Promise<unknown> {
   switch (method) {
     case "sidecar.configure": {
       // Main owns host-core; sidecar only keeps config metadata.
-      if (params && typeof params === "object" && "networkProxy" in params) {
+      if (params && typeof params === "object" &&
+        ("networkProxy" in params || "desktopDnsEnabled" in params)) {
+        if ("desktopDnsEnabled" in params && typeof params.desktopDnsEnabled !== "boolean") {
+          throw Object.assign(new Error("desktopDnsEnabled must be a boolean"), {
+            errorCode: "INVALID_PARAMS",
+          });
+        }
         applyNodeNetworkProxy(
           normalizeNetworkProxy(params.networkProxy),
           process.env,
           typeof params.systemProxyRelayUrl === "string"
             ? params.systemProxyRelayUrl
             : undefined,
+          params.desktopDnsEnabled === true,
         );
       }
       return { ok: true, mode: "host-proxy" };

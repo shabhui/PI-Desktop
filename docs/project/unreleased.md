@@ -1,5 +1,17 @@
 # Unreleased changes
 
+- Added optional provider retry counts and initial waits in Settings → AI.
+  Clear either field to restore the existing per-class defaults; zero means
+  unlimited retries or an immediate wait. Changes apply on the next turn,
+  including builtin subagents. Stop and server `Retry-After` remain authoritative.
+- Added native DNS over HTTPS in Settings → General → Network, off by default
+  and local to this device. Chromium owns resolution for supported Desktop
+  routes, including provider/Host traffic through the authenticated local relay.
+  System DNS fallback requires explicit opt-in; disabling retains preferences
+  without changing OS DNS or trust. Startup/configuration races now reject stale
+  Host/sidecar state instead of admitting an unconfigured provider process.
+  See [Network and AI settings](../spec/04-ux/06-settings-ia.md) for defaults,
+  reset semantics and scope. This entry does not mark the candidate as released.
 - Fixed prompt cache misses after a conversation's agent runtime is rebuilt
   (#1972). Rebuilding happens after a restart or when the thinking level, mode,
   project rules, or model settings change. Assistant replies now keep the

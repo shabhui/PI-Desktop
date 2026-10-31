@@ -140,7 +140,18 @@ test("Basics and AI tabs expose their respective app and AI controls", () => {
   assert.match(aiSource, /settings\.defaultsTitle/);
   assert.match(aiSource, /CommandShellRow/);
   assert.match(aiSource, /enterToSend: !settings\.enterToSend/);
-  assert.match(aiSource, /infiniteProviderRetry: settings\.infiniteProviderRetry !== true/);
+  // The retry controls live in their own feature module; the AI tab only wires
+  // them, and the module keeps the released infinite-retry toggle semantics.
+  assert.match(aiSource, /<ProviderRetrySettingsRows/);
+  assert.match(
+    settingsPageSource,
+    /infiniteProviderRetry: settings\.infiniteProviderRetry !== true/,
+  );
+  assert.match(settingsPageSource, /save=\{\(value\) => \(\{ providerRetryMaxAttempts: value \}\)\}/);
+  assert.match(settingsPageSource, /save=\{\(value\) => \(\{ providerRetryInitialDelayMs: value \}\)\}/);
+  // An unusable entry is rejected in the row and never written to the host.
+  assert.match(settingsPageSource, /settings\.providerRetryInvalidValue/);
+  assert.match(settingsPageSource, /settings\.providerRetrySaveError/);
   assert.match(aiSource, /LargePasteThresholdRow/);
   assert.match(aiSource, /ContextUsageDisplayRow/);
   assert.doesNotMatch(aiSource, /PromptEnhancementCard|promptEnhancement/);
@@ -155,14 +166,28 @@ test("Basics and AI tabs expose their respective app and AI controls", () => {
     "settings.contextUsageDisplayUsed",
     "settings.infiniteProviderRetry",
     "settings.infiniteProviderRetryDesc",
+    "settings.providerRetryMaxAttempts",
+    "settings.providerRetryMaxAttemptsDesc",
+    "settings.providerRetryInitialDelayMs",
+    "settings.providerRetryInitialDelayMsDesc",
   ]) {
+    // Every locale ships the row copy; the search index finds it by key.
     assert.match(settingsSearchSource, new RegExp(key.replaceAll(".", "\\.")));
-    assert.match(enLocaleSource, new RegExp(`${key.split(".").at(-1)}:`));
-    assert.match(zhLocaleSource, new RegExp(`${key.split(".").at(-1)}:`));
-    assert.match(trLocaleSource, new RegExp(`${key.split(".").at(-1)}:`));
+    for (const locale of [
+      enLocaleSource,
+      zhLocaleSource,
+      trLocaleSource,
+      zhTWLocaleSource,
+      koLocaleSource,
+      ptBRLocaleSource,
+    ]) {
+      assert.match(locale, new RegExp(`${key.split(".").at(-1)}:`));
+    }
   }
   assert.match(sharedTypesSource, /contextUsageDisplay\?: ContextUsageDisplay/);
   assert.match(sharedTypesSource, /infiniteProviderRetry\?: boolean/);
+  assert.match(sharedTypesSource, /providerRetryMaxAttempts\?: number/);
+  assert.match(sharedTypesSource, /providerRetryInitialDelayMs\?: number/);
   assert.match(sharedTypesSource, /ContextUsageDisplay = "remaining" \| "used"/);
   assert.match(sharedTypesSource, /chatContentMaxWidth\?: number/);
   assert.match(settingsPageSource, /largePasteThreshold/);

@@ -20,6 +20,8 @@ Each ADR includes:
 
 | ID | Title | Status |
 |---|---|---|
+| native-desktop-dns | [Native Desktop DNS over HTTPS](native-desktop-dns.md) | Accepted for implementation |
+| 0338 | [Configurable provider retry budget and first wait](0338-configurable-provider-retry.md) | Accepted |
 | plugin-projects-list | [Read-only durable project enumeration for plugins](plugin-projects-list.md) | Accepted |
 | append-only-review-state | [Append-only review state](append-only-review-state.md) | Implemented candidate |
 | lossless-tool-image-storage | [Lossless tool-image storage and bounded history mutations](lossless-tool-image-storage.md) | Implemented candidate |

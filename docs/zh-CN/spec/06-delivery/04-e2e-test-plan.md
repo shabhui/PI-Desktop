@@ -9,6 +9,91 @@
 
 ---
 
+### E2E-PROVIDER-retry-backoff-is-not-idle
+
+- **入口：** 构建 shared 和生产 sidecar bundle，运行
+  `node scripts/e2e-provider-retry-idle.mjs`（约一分钟）。
+- **步骤：** 本机 HTTP fixture 在 30 秒空闲上限下返回一次 429 与 30 秒 Retry-After 后成功；
+  另一次请求保持静默直至超时再成功；再在退避期间停止回合。
+- **预期：** 计划退避只消耗一次重试，不被流空闲看门狗计时；旧静默请求先关闭，新请求才开始；
+  Stop 后不再发起请求。真实生产 sidecar/provider adapter 与本机 HTTP 配合模拟 Host 响应，
+  不替代真实 Rust Host 持久化验收。
+
+### E2E-PROVIDER-configurable-retry
+
+- **入口：** 构建 shared 后运行
+  `node --test --test-concurrency=1 apps/desktop/test/provider-retry-settings-user-path.test.mjs apps/desktop/test/settings-roundtrip.test.mjs`。
+  执行 shared 的 `provider-retry.test.ts`、agent-runtime 的 `provider-retry.test.ts`、
+  `runtime.test.ts`、`subagent.test.ts` 和 host-runtime 的 `launch-resolver.test.ts`；
+  保留上面的真实 sidecar 退避/空闲验收。
+- **步骤：** 渲染真实设置行；检查空值，用失焦/Enter 保存次数和等待，保存零，拒绝非法数字，
+  清空两个覆盖值，模拟保存失败，切换无尽重试，并从 fixture 保存快照重新挂载。
+  浏览器的原生非法数字草稿（空 value 但 `validity.badInput` 为 true）不得误清空已有设置。
+  以自定义、旧格式和无限重试事件调用真实转录本文案函数，验证生效次数上限与不小于零的倒计时。
+- **预期：** 零仍为无上限/立即；省略不清空，显式 null 恢复默认，原本未设置的空框不写入。
+  保存失败恢复旧显示；下一回合及复用运行时、内置子代理继承策略。429/瞬时故障预算独立，
+  请求建立/流式阶段共用各自预算，完整响应补充预算而不重放工具。Stop、部分响应保护、
+  Retry-After、超大可中止等待和默认调度不变；其他默认次数场景须先清除数值覆盖。
+- **边界：** Electron 使用真实行与 toast，持久化由 fixture 模拟；roundtrip 测试执行真实
+  renderer/main/preload 校验。执行测试控制 provider 边界。Rust 的校验、清空和便携同步测试
+  仍为独立门禁，这些测试不证明真实 Host 或安装包持久化流程。
+
+### E2E-NETWORK-native-dns
+
+- **入口：** 构建 shared、agent-runtime、host-runtime 后运行
+  `node --test --test-concurrency=1 apps/desktop/test/network-dns-native.test.mjs apps/desktop/test/network-dns-settings-user-path.test.mjs apps/desktop/test/network-dns.test.mjs apps/desktop/test/network-settings-ipc.test.mjs apps/desktop/test/network-runtime-startup.test.mjs apps/desktop/test/network-sidecar-rpc.test.mjs`。
+- **原生步骤：** 隔离 Electron profile、两个回环 RFC 8484 HTTPS DNS 与回环 HTTP 目标。
+  解析 `pi-doh-target.invalid`，在系统/自定义模式经真实认证中继/provider dispatcher 请求，
+  保留 Host 头；切换 DNS、关闭并通过系统查询 sentinel 验证路线，再测试不可达的严格解析器。
+  sentinel 不代表真实外部系统 DNS 查询。
+- **设置/启动步骤：** 验证默认关闭、启用/保存、非法端点、显式回退、带非法草稿关闭、偏好恢复、
+  空端点重置和保存失败。串行应用 Host 合并结果，在各异步边界替换 Host/sidecar；拒绝陈旧应用。
+  候选配置成功才发布，追赶新网络设置，销毁失败候选，禁止后续 UI bootstrap 重放旧快照。
+- **预期：** 严格模式不静默回退；缺少必需中继不得启动提供商；非法运行期 DNS 标志返回
+  INVALID_PARAMS。有效变更清缓存，旧查询不用于新连接；取消、超时和销毁忽略迟到结果。
+  应用失败后可通过成功重试或关闭恢复；关闭保留系统默认行为。
+- **边界：** 原生 fixture 使用真实 Chromium API，仅给测试进程固定 fixture 证书 SPKI，
+  禁止全局忽略证书和 `host-resolver-rules`。UI 的 IPC/持久化与启动 Host/进程边界是模拟的；
+  RPC 测试运行真实构建的 sidecar，但不发起提供商回合。三个平台的恢复有单元覆盖，
+  原生运行平台必须单独记录。Rust `network_dns`、`network_proxy`、设置和配置同步，
+  以及重新构建 Host 的持久化/重启和安装包验收仍是独立门禁。不使用正在运行的客户端或付费提供商。
+- **证据：** 记录 Task candidate、Base main、套件、结果与环境；未提交候选须记录源码指纹。
+  旧构建、模拟边界或其他平台的原生结果均不能证明当前可执行状态。
+
+### E2E-NETWORK-host-settings-restart-sync
+
+- **入口：** 构建 shared 和候选 Host 后运行
+  `PI_DESKTOP_HOST_BIN=<candidate-binary> node scripts/e2e-native-network-settings.mjs`。
+  必须明确指定存在的二进制，不得回退到旧构建。可用 `PI_DESKTOP_E2E_BASE_REF` 指定
+  main 引用（默认 `origin/main`）；它必须是当前候选的祖先。
+- **步骤：** 两个真实 stdio Host 使用临时 HOME/数据目录。保存重试和 DoH 偏好，更新无关
+  设置，拒绝非法局部写入且不产生部分持久化，用 null 分别清空覆盖值，并跨进程重启验证
+  零值和 DNS 关闭/启用偏好。仅将应用偏好连接到验证 SigV4 的回环 S3 fixture。
+  新设备必须明确选择远端应用偏好；审批前重试覆盖值仍未设置。双向同步自定义值、零和
+  清空，再重启两台设备并断开同步。
+- **预期：** 省略保留值，null 删除覆盖，零不丢失。重试可跨设备同步；各设备的 DNS 模式、
+  端点和回退偏好保持本机值。非法写入不部分保存。S3 对象加密且签名有效，断开同步不删除
+  远端数据，只有两个 Host 均停止后才清理 fixture。
+- **边界/证据：** 真实 Rust RPC、SQLite、重启和同步；只用本机 S3，不使用提供商、用户
+  profile 或 Desktop 进程。记录候选/main、未提交源码指纹、Host SHA-256、平台和完成步骤。
+  不替代 Chromium 原生 DNS 或实际打包可执行文件验收。
+
+### E2E-NETWORK-packaged-windows-zip
+
+- **入口：** 构建候选 release Host、runtime bundle 和 Desktop，以 `--publish never`、
+  `piDistribution=zip` 打包 Windows x64 ZIP。解压该 ZIP 后运行
+  `node scripts/e2e-packaged-network.mjs --package-dir <extracted-windows-zip>`。
+- **步骤：** 比对包内 Host/sidecar 哈希和 ASAR 中 Main/preload 与当前构建。使用包内
+  可执行程序而非开发 Electron，分别启动两个 fixture profile：严格回环 DoH 配合自定义
+  重试，以及关闭 DNS、保留端点并保存零次数/延迟。清除继承的 Host/runtime 路径覆盖，
+  只使用包内资源。执行现有 sandbox preload/IPC、Ctrl+R 和 800 会话响应性探针；要求
+  真实 sidecar 配置成功且无后端启动失败/崩溃事件，再用包内 Host 重开数据库核验设置。
+- **预期：** 当前资源在两种 DNS 模式均可启动，零值/自定义重试不丢失；ZIP metadata 使用
+  既有手动更新默认值。只清理 fixture 进程/profile，原始日志和哈希保留在会话 scratch。
+- **边界：** 只证明 Windows ZIP 启动和持久化，不证明 NSIS 安装、签名、更新投递或
+  macOS/Linux 原生行为。回环 DoH 端点故意不可达，用于证明严格模式可启动，不代表解析
+  成功；解析与严格失败由单独原生 DNS fixture 验证。禁止启动或修改已安装的用户实例/profile。
+
 ### E2E-PI-130-kernel-upgrade
 
 - **Preconditions:** Pi 1.3.0 with migrated patches, isolated fixture state, and
@@ -7759,7 +7844,7 @@ eleven-tool-round desktop paths are verified by
   3. 输入 `socks5://127.0.0.1:1080` 或 `http://127.0.0.1:7890` 后，立即选择“系统”，中间不要点击其他位置。确认 `settings.get` 中 `mode` 为 `system`，且 URL 与绕过列表仍保留。再选回“自定义”，确认两个值恢复到输入框，且 `mode` 为 `custom`。
   4. 对正在监听的代理点测试，确认已连接；对关闭的端口点测试，确认失败且不改已保存 URL。对需要认证的 HTTP / SOCKS5 代理填入 `user:pass@` 后再测，确认是已连接而不是 `net::ERR_NO_SUPPORTED_PROXIES`（issue #490）。
   5. 保存自定义代理后，通过已配置供应商发送一条简短提示。确认供应商请求和响应经过代理；即使 SOCKS5 代理将完整 bind 响应合并在一个 TCP 数据块中，请求仍能完成。再确认扩展市场刷新和 models.dev 刷新走代理；绕过列表中的回环地址不走代理。
-  6. 切到直连再切回系统。确认无需重启应用即可生效。再选回自定义，确认第 3 步的 URL 与绕过列表原样回来（系统/直连期间它们保留在 `AppSettings.networkProxy` 里）。
+  6. 未启用原生 DNS 时切到直连再切回系统，确认无需重启即生效且直连绕过系统中继。启用 DoH 时直连仍须经过认证的本机 DNS 中继。再选回自定义，确认第 3 步的 URL 与绕过列表原样回来（系统/直连期间它们保留在 `AppSettings.networkProxy` 里）。
 - **预期**：自定义覆盖模型请求、市场、更新、插件 `net.fetch` 和内置浏览器。工作区 Bash 的 `env` 看不到该设置写入的 `HTTP_PROXY` / `ALL_PROXY`。OAuth 仍走系统浏览器。`file:` / `ftp:`、SOCKS4 以及百分号编码错误的认证信息均被拒绝。带账号密码的 HTTP / SOCKS5 测试与应用不再报 `net::ERR_NO_SUPPORTED_PROXIES`（issue #490）。无协议/存储版本升级。
 - **链接规格**：`04-ux/06-settings-ia.md`、`03-runtime/07-process-model.md`、ADR 0177、D340
 - **验收**：B（设置）、F（供应商）、安全

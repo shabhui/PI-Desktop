@@ -50,6 +50,8 @@ import {
   type SubagentRunStatus as SharedSubagentRunStatus,
   type SubagentThinkingLevel,
   type UiMessage,
+  resolveProviderRetryPolicy,
+  type ProviderRetryPolicy,
 } from "@pi-desktop/shared";
 import { classifyAgentError } from "./agent-errors.js";
 import { readLocalRequestErrorDetails } from "./local-request-errors.js";
@@ -81,8 +83,6 @@ import { removeTrailingAssistantMessages } from "./system-transcript.js";
 import {
   classifyProviderError,
   delayWithAbort,
-  PROVIDER_RATE_LIMIT_MAX_RETRIES,
-  PROVIDER_TRANSIENT_MAX_RETRIES,
   isTransientProviderRetryCode,
   providerRateLimitDelayMs,
   providerSetupRetryDelayMs,
@@ -156,6 +156,14 @@ export type SubagentRunOptions = {
   provider: RuntimeProviderConfig;
   /** Inherited session policy for retrying transient provider failures. */
   infiniteProviderRetry?: boolean;
+  /**
+   * Inherited persisted retry ceiling after the first request. `0` means
+   * unlimited and `infiniteProviderRetry` wins; absent keeps the ten-retry
+   * default so a delegate never retries further than its parent.
+   */
+  providerRetryMaxAttempts?: number;
+  /** Inherited persisted first retry wait in milliseconds. */
+  providerRetryInitialDelayMs?: number;
   thinkingLevel: SubagentThinkingLevel;
   /** User-owned definition pins only, in configured order. Missing bindings fail visibly. */
   fallbackModels?: Array<{ key: string; provider?: RuntimeProviderConfig }>;
@@ -274,6 +282,8 @@ export class SubagentRun {
   private providerRetryInProgress = false;
   private providerTransientRetryAttempt = 0;
   private providerRateLimitRetryAttempt = 0;
+  /** Inherited retry policy, resolved once so every delegate attempt agrees. */
+  private readonly providerRetryPolicy: ProviderRetryPolicy;
   private provider: RuntimeProviderConfig;
   private thinkingLevel: SubagentThinkingLevel;
   private fallbackIndex = 0;
@@ -286,6 +296,12 @@ export class SubagentRun {
 
   constructor(opts: SubagentRunOptions) {
     this.opts = opts;
+    this.providerRetryPolicy = resolveProviderRetryPolicy({
+      infiniteProviderRetry: opts.infiniteProviderRetry,
+      providerRetryMaxAttempts: opts.providerRetryMaxAttempts,
+      providerRetryInitialDelayMs: opts.providerRetryInitialDelayMs,
+    });
+    this.retryState.initialDelayMs = this.providerRetryPolicy.initialDelayMs;
     const initialMessages = recoverMalformedToolCalls(opts.initialMessages ?? []);
     this.uniqueToolCalls = createToolCallIdentity(initialMessages);
     this.provider = opts.provider;
@@ -631,20 +647,16 @@ export class SubagentRun {
     phase: "request" | "stream",
   ): number | undefined {
     if (!error.retriable) return undefined;
-    const infinite = this.opts.infiniteProviderRetry === true;
+    const { maxAttempts } = this.providerRetryPolicy;
     if (error.code === "PROVIDER_RATE_LIMITED") {
-      if (!infinite && this.providerRateLimitRetryAttempt >= PROVIDER_RATE_LIMIT_MAX_RETRIES) {
-        return undefined;
-      }
+      if (this.providerRateLimitRetryAttempt >= maxAttempts) return undefined;
       return ++this.providerRateLimitRetryAttempt;
     }
     // Setup and stream failures share one bounded budget, exactly as the main
     // session does, so a delegate is not abandoned on a single gateway 502.
     void phase;
     if (!isTransientProviderRetryCode(error.code)) return undefined;
-    if (!infinite && this.providerTransientRetryAttempt >= PROVIDER_TRANSIENT_MAX_RETRIES) {
-      return undefined;
-    }
+    if (this.providerTransientRetryAttempt >= maxAttempts) return undefined;
     return ++this.providerTransientRetryAttempt;
   }
 
@@ -660,16 +672,22 @@ export class SubagentRun {
     this.agent.state.messages = messages;
     this.providerRetryInProgress = true;
     try {
+      const { initialDelayMs } = this.providerRetryPolicy;
       const delayMs =
         retryError.code === "PROVIDER_RATE_LIMITED"
           ? providerRateLimitDelayMs(
               this.providerRateLimitRetryAttempt,
               this.retryState.headers,
+              Date.now(),
+              Math.random(),
+              { initialDelayMs },
             )
           : providerSetupRetryDelayMs(
               this.providerTransientRetryAttempt,
               undefined,
               this.retryState.headers,
+              Date.now(),
+              { initialDelayMs },
             );
       await delayWithAbort(delayMs, this.runSignal());
       if (this.opts.signal?.aborted) return;

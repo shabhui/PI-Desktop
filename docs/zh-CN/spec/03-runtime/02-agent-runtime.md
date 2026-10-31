@@ -212,8 +212,9 @@ not temporary retry activity. See the English source section 5d and ADR 0206.
 助手消息 id，因此重试永远不会重启该回合或重新运行已完成的工具调用。
 如果压缩已经用摘要或保留的用户消息替换了失败的助手，重试会使用当前的压缩后转录本；
 存在尾部助手消息时会将其移除，但在调用 `continue()` 前不再要求转录本尾部必须是助手消息（issue #1768）。
-每次重试都可中止，并通过规范化的 status 事件报告它当前的退避。主会话、内置子代理和
-插件 one-shot 补全使用相同的错误码、预算大小和优先级。
+每次重试都可中止，并通过规范化的 status 事件报告它当前的退避。`retrying` activity 还携带该故障类别的
+生效上限 `maxAttempts`；不设上限时省略该字段并改为报告 `infinite`，缺少该字段的旧生产者按原有上限十次显示。
+主会话与内置子代理使用该策略；插件 one-shot 补全保留各自独立的有界默认策略。
 
 应用设置 `infiniteProviderRetry` 默认关闭。开启后，主会话及其内置子代理只跳过可重试
 网络/瞬时故障（含 `PROVIDER_RATE_LIMITED`）的次数上限。退避、`Retry-After`、可见重试状态和
@@ -221,16 +222,37 @@ not temporary retry activity. See the English source section 5d and ADR 0206.
 开启后可能在用户停止回合前持续消耗 API 用量。
 设置读取对此开关返回明确布尔值：缺省或关闭均规范化为 `false`。修改并保存其他设置不得因此校验失败或启用重试；非布尔值写入仍被拒绝。
 
-当 429 预算耗尽时，最终的助手错误和生命周期 `error` 只发出一次。
+应用设置 `providerRetryMaxAttempts` 与 `providerRetryInitialDelayMs` 只调整该策略，其余行为不变。
+`providerRetryMaxAttempts` 是初次请求之后允许的重试次数；429 与其他瞬时故障分别使用独立预算，
+请求建立和流式阶段共用各自类别的预算。`0` 表示不设上限，`infiniteProviderRetry: true` 仍优先。
+`providerRetryInitialDelayMs` 替换两条指数退避的首次等待，
+`0` 表示立即重试。被覆盖的调度上限取该类原上限与配置等待中的较大值，因此配置的等待不会在后续尝试中
+被压回；`Retry-After` 仍然优先并沿用该类原上限，429 的抖动与瞬时故障的确定性倍增保持不变。
+未设置的字段保持原有数值（十次重试；429 为 2s/30s，其余为 1s/8s），因此已有配置无需迁移。
+
+数值覆盖必须是大于等于 0 的 JS 安全整数。小数、负数、数字字符串、超过
+`Number.MAX_SAFE_INTEGER` 的数，以及 JavaScript 边界上显式提供的 `undefined` 会被拒绝。
+显式 `null` 则用于清除已保存的覆盖值：host-core 先合并设置补丁，再在规范化时移除该字段；
+省略字段不会清除已有值，零仍是有效覆盖。渲染器、Electron 与权威 Host 使用同一清空语义。
+已保存或已同步的非法值同样规范化为缺省，不导致启动失败。两个字段均属于可移植应用设置。
+超过 32 位定时器上限的计划等待按不超过 2 147 483 647 ms 的可中止切片执行，
+避免过大的单次 `setTimeout` 几乎立即触发。
+
+策略在 `agent.start` 准备回合时读取；复用中的 sidecar 运行时通过实时设置接口接收新值，因此设置变更
+在下一个回合生效而无需重启代理进程。内置子代理继承发起它的会话解析出的策略，无头启动在载荷中携带
+同样的两个值，一次性补全与压缩继续使用各自独立的有限预算。逐次尝试的流空闲看门狗不变：计划中的
+重试等待发生在两次尝试之间，不计入流空闲时间。
+
+当重试预算耗尽时，最终的助手错误和生命周期 `error` 只发出一次。
 提供程序故障在可用时于 `AppError.details` 中携带有界诊断：
 `phase`（`request` 或 `stream`）、`providerStatus`、`providerCode`、
 `providerWaitMs`、`streamMs`、`retryAttempt`、网络诊断
 （`networkCategory`、`networkCode`、`networkSyscall`、`networkHost`、
 `networkRoute`）以及请求关联字段（`requestMessages`、`requestBytes`、
 `compactionGeneration`）。
-对于持续的 429，
-`retryAttempt` 为 `10`；对于持续的非 429 瞬时故障，它也为 `10`。凭据与不受限制的
-响应正文永远不会进入事件或日志。每次重试都会新建请求、流和 `AbortController`；
+对于 429 和其他瞬时故障，`retryAttempt` 来自该类实际已领取的重试次数，大于零时写入，
+而非临时 activity 状态。有限预算耗尽时为默认的 `10` 或配置上限；无限模式不伪造固定十次的诊断值。
+凭据与不受限制的响应正文永远不会进入事件或日志。每次重试都会新建请求、流和 `AbortController`；
 重试唯一共享的状态是进程级 undici dispatcher。当同一来源在一轮内连续两次没有
 任何响应、且新尝试仍无法到达它时，下一次尝试前会重建一次传输（每 30 秒最多一次，
 `dns` 除外），避免重试继续复用连接已死的连接池。重建先安装替换、再优雅关闭旧

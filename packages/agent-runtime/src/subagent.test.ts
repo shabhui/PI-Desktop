@@ -984,6 +984,58 @@ describe("SubagentRun watchdogs", () => {
     }
   });
 
+  it("inherits the session's configured retry ceiling and first wait", async () => {
+    const { run } = createRun({ providerRetryMaxAttempts: 2 });
+    const claim = (error: unknown, phase: string) =>
+      (run as any).claimProviderRetry(error, phase);
+    const gateway502 = classifyAgentError("fetch failed");
+    expect(claim(gateway502, "request")).toBe(1);
+    expect(claim(gateway502, "stream")).toBe(2);
+    expect(claim(gateway502, "request")).toBeUndefined();
+
+    // Zero means unlimited, and infinite mode still outranks a configured cap.
+    const { run: unlimited } = createRun({ providerRetryMaxAttempts: 0 });
+    const unlimitedClaim = (error: unknown, phase: string) =>
+      (unlimited as any).claimProviderRetry(error, phase);
+    for (let attempt = 1; attempt <= PROVIDER_TRANSIENT_MAX_RETRIES + 2; attempt += 1) {
+      expect(unlimitedClaim(gateway502, "stream")).toBe(attempt);
+    }
+    const { run: infinite } = createRun({
+      providerRetryMaxAttempts: 1,
+      infiniteProviderRetry: true,
+    });
+    const infiniteClaim = (error: unknown, phase: string) =>
+      (infinite as any).claimProviderRetry(error, phase);
+    for (let attempt = 1; attempt <= PROVIDER_TRANSIENT_MAX_RETRIES + 2; attempt += 1) {
+      expect(infiniteClaim(gateway502, "stream")).toBe(attempt);
+    }
+  });
+
+  it("waits the configured first delay before continuing the delegate", async () => {
+    const { run } = createRun({ providerRetryInitialDelayMs: 7_000 });
+    run.agent.state.messages = [{ role: "user", content: "task", timestamp: 1 }];
+    run.agent.continue = vi.fn(async () => undefined);
+    run.agent.waitForIdle = vi.fn(async () => undefined);
+    run.pendingProviderRetry = {
+      code: "STREAM_FAILED",
+      message: "stream terminated",
+      retriable: true,
+    };
+    run.providerTransientRetryAttempt = 1;
+
+    vi.useFakeTimers();
+    try {
+      const retry = run.retryPendingProviderFailure();
+      await vi.advanceTimersByTimeAsync(6_999);
+      expect(run.agent.continue).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      await retry;
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(run.agent.continue).toHaveBeenCalledOnce();
+  });
+
   it("never terminates the delegate on a turn count", async () => {
     const { run } = createRun();
     // 80 was the highest value the removed clamp ever allowed.

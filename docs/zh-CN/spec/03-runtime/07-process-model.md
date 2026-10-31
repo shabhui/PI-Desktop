@@ -45,9 +45,9 @@ profile。
 1. Electron 主启动
 2. 加载英文语言环境默认值
 3. 生成 Rust host-core
-4. `app.handshake` 与 host-core
-5. 生成 Node pi 代理 sidecar
-6. 通过 main 将代理 sidecar 工具桥连接到 host-core
+4. 与 host-core 执行 `app.handshake`，恢复权威网络设置
+5. 启动 Node pi sidecar，通过 main 连接 Host 工具桥
+6. 针对当前 Host/网络状态完成配置后再发布 sidecar
 7. 创建主窗口/渲染器
 8. Renderer 通过 main 执行 `app/getVersion` 健康检查
 
@@ -65,6 +65,36 @@ queued/running `plan_approvals` 执行状态已中断并中止它们
 的启动会用 shell 替换该表面，恢复表面则替换启动画面。渲染器绘制的窗口控制按钮
 保持在该表面之上，因此无边框的 Windows/Linux 窗口始终可以关闭；从该表面退出走
 渲染器退出通道（`pi-desktop/app/quit`），它与“退出”菜单项执行同一套有序关停。
+
+Host 启动后，`bootBackends` 读取权威的 `AppSettings.networkProxy` 和
+`AppSettings.networkDns`，应用网络设置并配置 Host 中继，再启动 sidecar。它是启动时
+唯一的网络恢复入口，后续 UI bootstrap 不得重放旧设置快照。每个异步配置边界之后检查
+Host 身份。sidecar 候选先连接该 Host 并完成配置，再发布到运行时状态；若配置期间网络
+快照改变，先追赶新快照；Host/sidecar 被替换或配置失败时拒绝并销毁候选。重启也遵循该边界。
+
+Chromium 使用 `session.setProxy`，主进程使用 `net.fetch`。系统模式下，提供商与 Host
+市场 curl 通过认证的回环 SOCKS5 中继，仍按 `resolveProxy` 的 OS/PAC 路由及回退顺序连接。
+认证信息只经 sidecar 配置和 Host RPC 传递，不写入进程环境；自定义代理的认证方式不变。
+未启用原生 DNS 时，直连仍绕过系统中继。所有路线均保留 TLS 验证。
+
+DoH 是默认关闭、仅本机生效的可选覆盖。Electron 通过 `app.configureHostResolver` 拥有
+Chromium 原生解析与缓存。启用后，无论系统、直连还是自定义模式，Desktop 提供商及 Host
+curl 都必须走认证中继；Host 使用 `socks5h://` 与空 `--noproxy`，避免环境绕过解析策略。
+代理端点域名在本机解析，被代理的目标域名仍由上游代理解析。运行期字段
+`desktopDnsEnabled` 缺省为 false，显式提供时必须是布尔值，不属于便携设置或环境变量；
+缺少必需中继时关闭失败路径，不静默改走系统 DNS。
+
+DoH 默认使用 Chromium `secure`；只有用户明确允许明文回退时才使用 `automatic`。
+默认端点为 `https://1.1.1.1/dns-query`，自定义域名端点可能需要系统 DNS 引导解析。
+初始系统模式不配置 Chromium；关闭已有覆盖时恢复 `automatic`、无自定义服务器、
+仅 macOS 启用内置解析器，不强行关闭 Chromium 自有的自动 DNS 行为。有效配置变更与缓存
+清理串行执行，旧代查询不能用于建立新连接。操作有 10 秒上限；取消仅停止等待并忽略迟到结果，
+不声称取消 Chromium 的共享查询。原生配置失败后阻止新查询，直到成功恢复；不为清缓存中断已连接请求。
+
+设置写入使用 Host 返回的合并结果，串行应用并在异步边界检查 Host/sidecar 身份。
+持久化先于运行期应用，因此报错后设置仍可能已经保存；允许重试或关闭恢复，不承诺事务回滚。
+工作区 Bash、系统浏览器、独立无头/远程 Host 和单独拥有固定 DNS 策略的传输不受影响。
+参见 [原生 Desktop DNS 决策](/adr/native-desktop-dns)。
 
 ## 4. 崩溃策略
 

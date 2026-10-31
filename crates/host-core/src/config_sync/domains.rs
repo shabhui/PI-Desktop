@@ -43,6 +43,8 @@ pub(crate) const PORTABLE_APPLICATION_FIELDS: &[&str] = &[
     "defaultModelId",
     "defaultMode",
     "infiniteProviderRetry",
+    "providerRetryMaxAttempts",
+    "providerRetryInitialDelayMs",
     "keybindings",
     "linkOpenTarget",
     "contextUsageDisplay",
@@ -105,6 +107,7 @@ pub const DOMAIN_ADAPTERS: &[DomainAdapterSpec] = &[
             "transcriptDisplayMode",
             "enterToSend",
             "keepCommandsExpanded",
+            "provider retry policy",
             "keybindings",
             "display bindings",
             "provider/model bindings",
@@ -114,6 +117,7 @@ pub const DOMAIN_ADAPTERS: &[DomainAdapterSpec] = &[
             "window geometry",
             "default command shell",
             "network proxy",
+            "native DNS",
             "developer mode",
             "onboarding state",
             "permission mode",
@@ -630,6 +634,7 @@ mod tests {
     fn adapter_registry_covers_every_portable_domain() {
         assert_eq!(DOMAIN_ADAPTERS.len(), ALL_DOMAINS.len());
         assert!(!PORTABLE_APPLICATION_FIELDS.contains(&"defaultPermissionMode"));
+        assert!(!PORTABLE_APPLICATION_FIELDS.contains(&"networkDns"));
         // The reasoning-display boolean, its legacy fallback, the transcript
         // display mode and the deprecated command-folding preference are portable,
         // and each is advertised by the application adapter.
@@ -637,7 +642,12 @@ mod tests {
         assert!(PORTABLE_APPLICATION_FIELDS.contains(&"transcriptDisplayMode"));
         assert!(PORTABLE_APPLICATION_FIELDS.contains(&"thinkingDisplayMode"));
         assert!(PORTABLE_APPLICATION_FIELDS.contains(&"keepCommandsExpanded"));
+        // The configurable provider retry policy syncs with the rest of the
+        // application preferences, so a second machine keeps the user's ceiling.
+        assert!(PORTABLE_APPLICATION_FIELDS.contains(&"providerRetryMaxAttempts"));
+        assert!(PORTABLE_APPLICATION_FIELDS.contains(&"providerRetryInitialDelayMs"));
         let application = adapter_for(DOMAIN_APPLICATION).expect("application adapter");
+        assert!(application.local_overlays.contains(&"native DNS"));
         assert!(application.exportable_fields.contains(&"showThinking"));
         assert!(application
             .exportable_fields

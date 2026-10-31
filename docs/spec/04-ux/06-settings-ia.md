@@ -194,7 +194,7 @@ Settings is a **full-window page** that replaces the app sidebar + main chrome (
   [01-ui-ia.md §3.2](01-ui-ia.md#32-sidebar-project-groups).
 - **Network** card:
   - **Proxy**: a segmented control — System, Direct, Custom. System is the
-    default and lets Chromium follow the OS proxy; Direct disables the proxy;
+    default and lets Chromium follow the OS proxy; Direct disables upstream proxying;
     Custom applies one HTTP, HTTPS, or SOCKS5 URL to app-owned outbound
     traffic (model calls, marketplace, updates, model catalog, plugin
     `net.fetch`, and the in-app browser). Workspace Bash and the system
@@ -214,6 +214,24 @@ Settings is a **full-window page** that replaces the app sidebar + main chrome (
     decides what applies, and the values come back with Custom instead of the
     built-in `socks5://127.0.0.1:1080` (issue #1541). Nothing applies them
     while another mode is selected.
+  - **DNS over HTTPS**: a default-off, device-local switch backed by optional
+    `AppSettings.networkDns` (`mode: system | doh`, `serverUrl`,
+    `allowSystemFallback`). It is excluded from portable configuration sync.
+    The server field accepts an HTTPS RFC 8484 POST endpoint and defaults to
+    `https://1.1.1.1/dns-query`; a blank field restores that endpoint. Custom
+    hostname endpoints may need system DNS bootstrap. TLS stays verified, and
+    credentials, fragments and URI templates are rejected. Errors are inline
+    and associated with the field; failed saves also show a localized error.
+  - DoH starts in strict mode. **Allow system DNS fallback** explicitly opts
+    into possible plaintext resolution. Disabling DoH retains the saved server
+    and fallback preference and remains possible with an invalid unsaved draft.
+    Re-enabling restores those preferences. Saving/disabling never changes OS
+    DNS, trust stores, proxy/VPN settings or external applications.
+  - With DoH enabled, Desktop provider and Host marketplace traffic use the
+    authenticated local relay in System, Direct and Custom modes; proxy and
+    bypass choices still decide the upstream route. Proxied destination DNS
+    stays with the proxy. Runtime-application failures are reported, but settings
+    may already be persisted; retry or disable to recover, not a promised rollback.
   - **Relaxed network mode**: one switch persisting as
     `AppSettings.networkPolicy.mode` (`relaxed` | `strict`), **on by default**.
     When it is on, an endpoint the user typed themselves — a model base URL, an
@@ -285,11 +303,11 @@ Settings is a **full-window page** that replaces the app sidebar + main chrome (
 - **Defaults** card: the host-backed default operating mode (Agent / Plan / Goal),
   command shell selection, Link open destination, context usage display
   (remaining or used), the Show thinking toggle, the Transcript display
-  segmented control, Enter-to-send control, the infinite provider retry switch,
-  and the large text paste threshold. The
-  retry switch is off by default and explains that network/transient provider
-  failures keep retrying until success; Stop still cancels the turn and the
-  setting may continue API usage while enabled. Link open destination uses the Work panel browser by default
+  segmented control, Enter-to-send control, the provider retry controls,
+  and the large text paste threshold. The unlimited retry switch is off by
+  default and explains that network/transient provider failures keep retrying
+  until success; Stop still cancels the turn and enabling unlimited retries may
+  continue API usage. Link open destination uses the Work panel browser by default
   and routes chat, transcript, and plugin HTTP(S) clicks to the system
   browser when set to Default OS browser. Plugin/settings clicks that want
   the work panel return to chat first so the dock is visible, without
@@ -301,6 +319,17 @@ Settings is a **full-window page** that replaces the app sidebar + main chrome (
   is remaining. The threshold controls when a text-only paste becomes a
   temporary session-scratch file; it defaults to 600 characters and accepts
   integer values from 1 through 1,000,000.
+- **Provider retry controls**: the existing unlimited toggle is followed by
+  optional retry-count and initial-wait inputs, using the shared settings rows
+  and numeric input. A nonnegative JS safe integer is saved on blur or Enter;
+  invalid input and failed saves restore the persisted display and show a
+  localized error. Clearing a saved value writes `null` to restore the default;
+  an already-unset blank field does not write. Zero means unlimited retries for
+  the count and immediate retry for the wait. The unlimited toggle takes
+  precedence over a numeric count. Unset values preserve ten retries per failure
+  class, with 429 initial/cap 2s/30s and transient initial/cap 1s/8s. The two
+  numeric preferences are portable and apply at the next turn, including reused
+  sidecars, builtin subagents and headless launches; an active turn is unchanged.
 - Composer text actions are contributed by explicitly installed plugins and
   appear only while their plugin is enabled and its `composer.transform`
   permission is granted. The host does not include a prompt-enhancement card or

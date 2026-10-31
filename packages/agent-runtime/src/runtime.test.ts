@@ -193,6 +193,8 @@ function createRuntime(
     commandShell: CommandShellOption;
     jevApiKey: string;
     turnId: string;
+    providerRetryMaxAttempts: number | undefined;
+    providerRetryInitialDelayMs: number | undefined;
     host: { call: ReturnType<typeof vi.fn>; onNotification?: ReturnType<typeof vi.fn> };
     onEvent: (envelope: unknown) => void;
   }> = {},
@@ -206,6 +208,8 @@ function createRuntime(
     provider: overrides.provider ?? provider,
     commandShell: overrides.commandShell ?? commandShell,
     thinkingLevel: overrides.thinkingLevel ?? "medium",
+    providerRetryMaxAttempts: overrides.providerRetryMaxAttempts,
+    providerRetryInitialDelayMs: overrides.providerRetryInitialDelayMs,
     history: overrides.history,
     compaction: overrides.compaction,
     compactionSettings: overrides.compactionSettings,
@@ -6620,6 +6624,149 @@ describe("DesktopAgentRuntime assistant thinking events", () => {
       expect(claim(transient, "request")).toBe(attempt);
     }
     expect(claim(transient, "request")).toBeUndefined();
+    await runtime.dispose();
+  });
+
+  it("applies the configured retry ceiling from settings at start", async () => {
+    const runtime = createRuntime({
+      onEvent: vi.fn(),
+      providerRetryMaxAttempts: 2,
+    });
+    const claim = (runtime as any).claimProviderRetry.bind(runtime);
+    const transient = classifyAgentError("fetch failed");
+    const rateLimited = classifyAgentError("429: too many requests");
+
+    // Both classes keep their own budget; only the size comes from settings.
+    expect(claim(transient, "request")).toBe(1);
+    expect(claim(transient, "stream")).toBe(2);
+    expect(claim(transient, "request")).toBeUndefined();
+    expect(claim(rateLimited, "request")).toBe(1);
+    expect(claim(rateLimited, "stream")).toBe(2);
+    expect(claim(rateLimited, "stream")).toBeUndefined();
+
+    await runtime.dispose();
+  });
+
+  it("reads a configured zero ceiling as unlimited retries", async () => {
+    const runtime = createRuntime({
+      onEvent: vi.fn(),
+      providerRetryMaxAttempts: 0,
+    });
+    const claim = (runtime as any).claimProviderRetry.bind(runtime);
+    const transient = classifyAgentError("fetch failed");
+    for (let attempt = 1; attempt <= PROVIDER_TRANSIENT_MAX_RETRIES + 5; attempt += 1) {
+      expect(claim(transient, "request")).toBe(attempt);
+    }
+    await runtime.dispose();
+  });
+
+  it("keeps infinite mode ahead of a configured ceiling", async () => {
+    const runtime = createRuntime({
+      onEvent: vi.fn(),
+      providerRetryMaxAttempts: 1,
+    });
+    runtime.setInfiniteProviderRetry(true);
+    const claim = (runtime as any).claimProviderRetry.bind(runtime);
+    const transient = classifyAgentError("fetch failed");
+    for (let attempt = 1; attempt <= PROVIDER_TRANSIENT_MAX_RETRIES + 2; attempt += 1) {
+      expect(claim(transient, "request")).toBe(attempt);
+    }
+    await runtime.dispose();
+  });
+
+  it("ignores an unusable persisted ceiling on a reused runtime", async () => {
+    const runtime = createRuntime({ onEvent: vi.fn() });
+    // A launch payload from another build must not shrink or expand the budget.
+    runtime.setProviderRetryLimits(1.5, -20);
+    const claim = (runtime as any).claimProviderRetry.bind(runtime);
+    const transient = classifyAgentError("fetch failed");
+    for (let attempt = 1; attempt <= PROVIDER_TRANSIENT_MAX_RETRIES; attempt += 1) {
+      expect(claim(transient, "request")).toBe(attempt);
+    }
+    expect(claim(transient, "request")).toBeUndefined();
+    await runtime.dispose();
+  });
+
+  it("waits the configured first delay and reports the configured budget", async () => {
+    const onEvent = vi.fn();
+    const runtime = createRuntime({
+      onEvent,
+      providerRetryMaxAttempts: 3,
+      providerRetryInitialDelayMs: 30_000,
+    });
+    const agent = (runtime as any).agent;
+    agent.state.messages = [{ role: "user", content: "hello", timestamp: 1 }];
+    agent.continue = vi.fn(async () => undefined);
+    agent.waitForIdle = vi.fn(async () => undefined);
+    (runtime as any).pendingProviderRetry = {
+      code: "STREAM_FAILED",
+      message: "stream terminated",
+      retriable: true,
+    };
+    (runtime as any).providerTransientRetryAttempt = 1;
+
+    vi.useFakeTimers();
+    try {
+      const retry = (runtime as any).retryPendingProviderFailure();
+      await vi.advanceTimersByTimeAsync(29_999);
+      // The configured wait is a real backoff, not an immediate re-request.
+      expect(agent.continue).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      await retry;
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(agent.continue).toHaveBeenCalledOnce();
+    const retrying = onEvent.mock.calls
+      .map(([envelope]) => (envelope as any).event)
+      .filter((event) => event.type === "status")
+      .map((event) => event.status.activity)
+      .find((activity) => activity?.phase === "retrying");
+    // The user sees the configured budget and the wait that actually ran.
+    expect(retrying).toMatchObject({
+      phase: "retrying",
+      attempt: 1,
+      maxAttempts: 3,
+      retryDelayMs: 30_000,
+    });
+    expect(retrying.infinite).toBeUndefined();
+    await runtime.dispose();
+  });
+
+  it("reports an unlimited retry budget as infinite activity", async () => {
+    const onEvent = vi.fn();
+    const runtime = createRuntime({
+      onEvent,
+      providerRetryMaxAttempts: 0,
+    });
+    const agent = (runtime as any).agent;
+    agent.state.messages = [{ role: "user", content: "hello", timestamp: 1 }];
+    agent.continue = vi.fn(async () => undefined);
+    agent.waitForIdle = vi.fn(async () => undefined);
+    (runtime as any).pendingProviderRetry = {
+      code: "STREAM_FAILED",
+      message: "stream terminated",
+      retriable: true,
+    };
+    (runtime as any).providerTransientRetryAttempt = 1;
+
+    vi.useFakeTimers();
+    try {
+      const retry = (runtime as any).retryPendingProviderFailure();
+      await vi.advanceTimersByTimeAsync(1_000);
+      await retry;
+    } finally {
+      vi.useRealTimers();
+    }
+
+    const retrying = onEvent.mock.calls
+      .map(([envelope]) => (envelope as any).event)
+      .filter((event) => event.type === "status")
+      .map((event) => event.status.activity)
+      .find((activity) => activity?.phase === "retrying");
+    expect(retrying?.infinite).toBe(true);
+    expect(retrying?.maxAttempts).toBeUndefined();
     await runtime.dispose();
   });
 
