@@ -201,6 +201,7 @@ export function fixtureHost({ history = [], instructions = false } = {}) {
   return async (method, params) => {
     switch (method) {
       case "session.get": return { session: { id: params.id, messages: history } };
+      case "tools.fileBatchCapabilities": return { version: 1, supported: false };
       case "session.appendMessage": {
         const message = params?.message;
         assert.ok(message && typeof message.id === "string", "session.appendMessage requires a message id");
