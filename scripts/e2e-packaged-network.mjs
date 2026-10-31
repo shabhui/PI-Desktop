@@ -51,7 +51,7 @@ for (const [name, packaged, built] of [
   assert.deepEqual(hashes[name], await fingerprint(built), `${name} differs from the current candidate build`);
 }
 for (const entry of ["out/main/index.js", "out/preload/index.cjs", "out/preload/plugin-panel.js"]) {
-  const bundled = extractFile(archive, entry);
+  const bundled = extractFile(archive, join(...entry.split("/")));
   assert.deepEqual(bundled, await readFile(join(root, "apps/desktop", entry)), `${entry} is stale in the package`);
   if (entry.startsWith("out/preload/")) {
     assert.doesNotMatch(bundled.toString("utf8"), /require\(["']\.\//, "Sandbox preloads must be self-contained");
