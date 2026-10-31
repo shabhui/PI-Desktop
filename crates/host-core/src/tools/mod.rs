@@ -25,6 +25,9 @@ use crate::workspace::{
 
 #[cfg(test)]
 mod file_lease_tests;
+mod file_search;
+#[cfg(test)]
+pub(crate) mod file_search_tests;
 mod grep_rg;
 pub mod hashline;
 pub mod ignore_rules;
@@ -979,7 +982,11 @@ impl<R: BufRead> LineReader<R> {
 
     /// Next line with its trailing newline (and CR) stripped, clipped to
     /// `max_chars`. `Ok(None)` marks end of input.
-    fn next_line(&mut self, max_chars: usize) -> std::io::Result<Option<ScannedLine>> {
+    fn next_line(
+        &mut self,
+        max_chars: usize,
+        cancellation: &file_search::Cancellation,
+    ) -> std::io::Result<Option<ScannedLine>> {
         // Cap the raw read at the widest UTF-8 encoding of the char budget so
         // the char clip below never has to split a multi-byte sequence.
         let max_bytes = max_chars.saturating_mul(4);
@@ -987,6 +994,9 @@ impl<R: BufRead> LineReader<R> {
         let mut clipped = false;
         let mut saw_input = false;
         loop {
+            #[cfg(test)]
+            file_search_tests::checkpoint(file_search_tests::Stage::Chunk);
+            file_search::check_io(cancellation)?;
             let chunk = match self.reader.fill_buf() {
                 Ok(chunk) => chunk,
                 Err(error) if error.kind() == ErrorKind::Interrupted => continue,
@@ -995,6 +1005,7 @@ impl<R: BufRead> LineReader<R> {
             if chunk.is_empty() {
                 break;
             }
+            let chunk = &chunk[..chunk.len().min(file_search::CHUNK_BYTES)];
             saw_input = true;
             let newline = chunk.iter().position(|byte| *byte == b'\n');
             let take = newline.unwrap_or(chunk.len());
@@ -1160,10 +1171,7 @@ async fn run_file_tool(
     args: &Value,
     allow_external_paths: bool,
     hashline: Option<&HashlineContext<'_>>,
-    lease: Option<(
-        Arc<crate::tool_budget::ToolPermit>,
-        Arc<crate::file_resources::FileResources>,
-    )>,
+    control: FileToolControl,
 ) -> Result<Value, hashline::ToolError> {
     let workspace = workspace.map(Path::to_path_buf);
     let tool_name = tool_name.to_string();
@@ -1171,12 +1179,23 @@ async fn run_file_tool(
     let hashline = hashline.map(|ctx| (ctx.session_id.to_string(), ctx.store.clone()));
     #[cfg(test)]
     let test_rg = grep_rg::current_test_rg();
+    #[cfg(test)]
+    let test_search = file_search_tests::current();
     tokio::task::spawn_blocking(move || {
         // Dropping the transport future does not stop this closure. It must
         // retain the lease until the actual filesystem body has returned.
-        let _file_lease = lease;
+        let _file_lease = control.lease;
+        // Mutations retain their existing entry-only cancellation contract.
+        let cancellation = if matches!(tool_name.as_str(), "Read" | "Glob" | "Grep") {
+            control.cancellation
+        } else {
+            None
+        };
+        #[cfg(test)]
+        let _test_search = file_search_tests::install(test_search);
         #[cfg(test)]
         file_lease_tests::pause(workspace.as_deref());
+        file_search::check(&cancellation)?;
         if let Some((_, resources)) = &_file_lease {
             resources
                 .validate(
@@ -1198,17 +1217,40 @@ async fn run_file_tool(
         });
         let (workspace, roots, hashline) = (workspace.as_deref(), &roots, hashline.as_ref());
         let args = &args;
-        match tool_name.as_str() {
-            "Read" => tool_read(workspace, roots, args, allow_external_paths, hashline)
+        let result = match tool_name.as_str() {
+            "Read" => tool_read(
+                workspace,
+                roots,
+                args,
+                allow_external_paths,
+                hashline,
+                &cancellation,
+            )
+            .map_err(Into::into),
+            "Glob" => tool_glob(workspace, roots, args, allow_external_paths, &cancellation)
                 .map_err(Into::into),
-            "Glob" => tool_glob(workspace, roots, args, allow_external_paths).map_err(Into::into),
-            "Grep" => tool_grep(workspace, roots, args, allow_external_paths, hashline)
-                .map_err(Into::into),
+            "Grep" => tool_grep(
+                workspace,
+                roots,
+                args,
+                allow_external_paths,
+                hashline,
+                &cancellation,
+            )
+            .map_err(Into::into),
             "Write" => tool_write(workspace, roots, args, allow_external_paths, hashline)
                 .map_err(Into::into),
             // "Edit": the caller routes only these five file tools here.
             _ => tool_edit(workspace, roots, args, allow_external_paths, hashline),
-        }
+        };
+        // An interrupted read is never converted into partial success, even
+        // on paths that normally tolerate an unreadable file or rg failure.
+        let result = file_search::check(&cancellation)
+            .map_err(Into::into)
+            .and(result);
+        #[cfg(test)]
+        file_search_tests::completed(&result);
+        result
     })
     .await
     .map_err(|error| hashline::ToolError::new("INTERNAL", format!("tool task failed: {error}")))?
@@ -1226,6 +1268,14 @@ pub async fn execute_tool_with_path_access(
     execute_tool_with_file_lease(workspace, scratch, tool_name, args, options, None, None).await
 }
 
+pub(crate) struct FileToolControl {
+    pub lease: Option<(
+        Arc<crate::tool_budget::ToolPermit>,
+        Arc<crate::file_resources::FileResources>,
+    )>,
+    pub cancellation: Option<watch::Receiver<bool>>,
+}
+
 pub async fn execute_tool_with_file_lease(
     workspace: Option<&Path>,
     scratch: Option<&Path>,
@@ -1234,6 +1284,28 @@ pub async fn execute_tool_with_file_lease(
     options: ToolExecutionOptions<'_>,
     file_lease: Option<Arc<crate::tool_budget::ToolPermit>>,
     resources: Option<Arc<crate::file_resources::FileResources>>,
+) -> ToolsExecuteResult {
+    execute_tool_with_file_control(
+        workspace,
+        scratch,
+        tool_name,
+        args,
+        options,
+        FileToolControl {
+            lease: file_lease.zip(resources),
+            cancellation: None,
+        },
+    )
+    .await
+}
+
+pub(crate) async fn execute_tool_with_file_control(
+    workspace: Option<&Path>,
+    scratch: Option<&Path>,
+    tool_name: &str,
+    args: &Value,
+    options: ToolExecutionOptions<'_>,
+    control: FileToolControl,
 ) -> ToolsExecuteResult {
     let ToolExecutionOptions {
         timeout_ms: requested_timeout_ms,
@@ -1287,7 +1359,7 @@ pub async fn execute_tool_with_file_lease(
                 args,
                 allow_external_paths,
                 hashline.as_ref(),
-                file_lease.zip(resources),
+                control,
             )
             .await
         }
@@ -1528,6 +1600,7 @@ fn tool_read(
     args: &Value,
     allow_external_paths: bool,
     hashline: Option<&HashlineContext<'_>>,
+    cancellation: &file_search::Cancellation,
 ) -> Result<Value, (String, String)> {
     let root = require_workspace(workspace)?;
     let path = args
@@ -1574,6 +1647,7 @@ fn tool_read(
             format!("Read requires a regular file: {path}"),
         ));
     }
+    file_search::check(cancellation)?;
     let display = display_tool_path(root_kind, root, &resolved);
     let extension = resolved
         .extension()
@@ -1590,13 +1664,14 @@ fn tool_read(
         }
     }
 
-    let bytes = std::fs::read(&resolved).map_err(|e| {
+    let bytes = file_search::read_file(&resolved, cancellation).map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             ("FILE_NOT_FOUND".into(), format!("File not found: {path}"))
         } else {
             ("TOOL_FAILED".into(), format!("read failed: {e}"))
         }
     })?;
+    file_search::check(cancellation)?;
     if hashline::looks_binary_bytes(&bytes) {
         return Err((
             "TOOL_BINARY_CONTENT".into(),
@@ -1605,6 +1680,7 @@ fn tool_read(
     }
 
     let file = hashline::normalize_file(&bytes);
+    file_search::check(cancellation)?;
     let tag = hashline::tag_of_lf_text(&file.text);
     let total_line_count = hashline::split_lines(&file.text).len();
     let window = hashline::format_read_window(
@@ -2017,19 +2093,21 @@ fn candidate_files(
     scoped: bool,
     include: Option<&globset::GlobSet>,
     max_files: usize,
-) -> (Vec<PathBuf>, bool) {
+    cancellation: &file_search::Cancellation,
+) -> Result<(Vec<PathBuf>, bool), (String, String)> {
+    file_search::check(cancellation)?;
     if search_root.is_file() {
         if ignore_rules::is_sensitive_path(search_root) {
-            return (Vec::new(), false);
+            return Ok((Vec::new(), false));
         }
         let relative = search_root
             .file_name()
             .map(Path::new)
             .unwrap_or(search_root);
         if include.is_some_and(|set| !glob_matches(set, relative)) {
-            return (Vec::new(), false);
+            return Ok((Vec::new(), false));
         }
-        return (vec![search_root.to_path_buf()], false);
+        return Ok((vec![search_root.to_path_buf()], false));
     }
 
     let mut walker = WalkBuilder::new(search_root);
@@ -2040,7 +2118,13 @@ fn candidate_files(
     ignore_rules::configure_walker(&mut walker, ignore_root, scoped);
     let mut candidates: Vec<(PathBuf, SystemTime)> = Vec::new();
     let mut capped = false;
-    for entry in walker.build().flatten() {
+    let mut entries = walker.build();
+    loop {
+        #[cfg(test)]
+        file_search_tests::checkpoint(file_search_tests::Stage::Walk);
+        file_search::check(cancellation)?;
+        let Some(entry) = entries.next() else { break };
+        let Ok(entry) = entry else { continue };
         let path = entry.path();
         if !path.is_file() {
             continue;
@@ -2066,10 +2150,11 @@ fn candidate_files(
     // likely to be the one the question is about than an alphabetically early
     // one, so a capped result keeps the useful half.
     candidates.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-    (
+    file_search::check(cancellation)?;
+    Ok((
         candidates.into_iter().map(|(path, _)| path).collect(),
         capped,
-    )
+    ))
 }
 
 fn tool_glob(
@@ -2077,6 +2162,7 @@ fn tool_glob(
     roots: &ContainedRoots,
     args: &Value,
     allow_external_paths: bool,
+    cancellation: &file_search::Cancellation,
 ) -> Result<Value, (String, String)> {
     let root = require_workspace(workspace)?;
     let pattern = args
@@ -2109,10 +2195,12 @@ fn tool_glob(
         scoped,
         Some(&set),
         GLOB_MAX_LIMIT * 8,
-    );
+        cancellation,
+    )?;
     let mut matches: Vec<String> = Vec::new();
     let mut bytes = 0_usize;
     for path in &files {
+        file_search::check(cancellation)?;
         if matches.len() >= limit {
             truncated = true;
             break;
@@ -2145,6 +2233,7 @@ fn tool_grep(
     args: &Value,
     allow_external_paths: bool,
     hashline: Option<&HashlineContext<'_>>,
+    cancellation: &file_search::Cancellation,
 ) -> Result<Value, (String, String)> {
     let root = require_workspace(workspace)?;
     let pattern = args
@@ -2220,15 +2309,17 @@ fn tool_grep(
         mode,
         case_insensitive,
         head_limit,
-    }) {
-        return Ok(mint_grep_tags(
+        cancellation,
+    })? {
+        return mint_grep_tags(
             root,
             roots,
             allow_external_paths,
             mode,
             value,
             hashline,
-        ));
+            cancellation,
+        );
     }
 
     let (files, mut truncated) = candidate_files(
@@ -2237,7 +2328,8 @@ fn tool_grep(
         scoped,
         include.as_ref(),
         GREP_MAX_CANDIDATE_FILES,
-    );
+        cancellation,
+    )?;
 
     let mut hits: Vec<Value> = Vec::new();
     let mut counts: Vec<Value> = Vec::new();
@@ -2246,6 +2338,7 @@ fn tool_grep(
     let mut clipped_lines = 0_usize;
     let mut bytes = 0_usize;
     'files: for path in &files {
+        file_search::check(cancellation)?;
         let Ok(mut reader) = LineReader::open(path) else {
             continue;
         };
@@ -2259,7 +2352,8 @@ fn tool_grep(
         let mut file_matches = 0_usize;
         // A read error mid-file is treated as end of file: partial matches from
         // what was readable beat dropping the file entirely.
-        while let Ok(Some(line)) = reader.next_line(MAX_LINE_CHARS) {
+        while let Ok(Some(line)) = reader.next_line(MAX_LINE_CHARS, cancellation) {
+            file_search::check(cancellation)?;
             line_no += 1;
             if !re.is_match(&line.text) {
                 continue;
@@ -2288,6 +2382,7 @@ fn tool_grep(
                 _ => {}
             }
         }
+        file_search::check(cancellation)?;
         if file_matches == 0 {
             continue;
         }
@@ -2301,7 +2396,8 @@ fn tool_grep(
         }
     }
 
-    Ok(mint_grep_tags(
+    file_search::check(cancellation)?;
+    mint_grep_tags(
         root,
         roots,
         allow_external_paths,
@@ -2316,7 +2412,8 @@ fn tool_grep(
             truncated,
         ),
         hashline,
-    ))
+        cancellation,
+    )
 }
 
 pub(super) fn grep_output(
@@ -2371,7 +2468,9 @@ fn mint_grep_tags(
     mode: &str,
     out: Value,
     hashline: Option<&HashlineContext<'_>>,
-) -> Value {
+    cancellation: &file_search::Cancellation,
+) -> Result<Value, (String, String)> {
+    file_search::check(cancellation)?;
     use std::collections::BTreeMap;
     let mut per_file: BTreeMap<String, Option<Vec<u64>>> = BTreeMap::new();
     match mode {
@@ -2413,6 +2512,7 @@ fn mint_grep_tags(
     }
     let mut tags = serde_json::Map::new();
     for (display, lines) in per_file {
+        file_search::check(cancellation)?;
         let Ok((resolved, _)) =
             resolve_tool_path_with_external(root, roots, &display, allow_external_paths)
         else {
@@ -2420,12 +2520,13 @@ fn mint_grep_tags(
         };
         let matched = lines.as_deref();
         if let Some((path, tag)) =
-            hashline::record_grep_file(hashline, &resolved, &display, matched)
+            file_search::record_grep_file(hashline, &resolved, &display, matched, cancellation)?
         {
             tags.insert(path, json!(tag));
         }
     }
-    hashline::attach_tags(out, tags)
+    file_search::check(cancellation)?;
+    Ok(hashline::attach_tags(out, tags))
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -4597,7 +4698,7 @@ mod tests {
             .contains("headLimit"));
     }
 
-    fn write_fake_rg(dir: &std::path::Path, script: &str) -> std::path::PathBuf {
+    pub(super) fn write_fake_rg(dir: &std::path::Path, script: &str) -> std::path::PathBuf {
         #[cfg(windows)]
         {
             let path = dir.join("rg.cmd");

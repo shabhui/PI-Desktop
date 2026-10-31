@@ -57,6 +57,7 @@ import {
 } from "../runtime/session-runtime";
 import type { StoreAccess } from "./types";
 import { switchWorkPanelSession } from "./work-panel-slice";
+import { runSessionAbort } from "../runtime/session-abort";
 
 export type SessionSliceDependencies = StoreAccess & {
   runtime: SessionRuntime;
@@ -863,15 +864,16 @@ export function createSessionSlice({
     /** Abort one session's running turn, whether or not it is the visible one. */
     abortSession: async (sessionId) => {
       if (!sessionId) return;
-      try {
-        await api.abort(sessionId);
-      } finally {
+      const target = get().sessions.find((session) => session.id === sessionId);
+      if (!sessionAllows(target ?? { id: sessionId }, "canStop")) return;
+      await runSessionAbort({ get, set }, runtime, sessionId, async (owner) => {
+        if (!(await owner.abort()) || !owner.isCurrent()) return;
         set((state) => ({
           isRunning:
             state.activeSessionId === sessionId ? false : state.isRunning,
           runningSessions: { ...state.runningSessions, [sessionId]: false },
         }));
-      }
+      });
     },
   };
 }

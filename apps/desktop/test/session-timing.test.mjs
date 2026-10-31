@@ -3,9 +3,12 @@ import test from "node:test";
 import {
   calculateSessionTimingBreakdown,
   calculateSessionTiming,
+  combineSessionTimingTotals,
+  createSessionTimingSnapshotCache,
   loadEarlierModelResponseDuration,
   loadEarlierSessionTiming,
   sumModelResponseDuration,
+  sumSessionTiming,
 } from "../src/lib/session-timing.ts";
 
 test("session response duration sums top-level model responses only", () => {
@@ -239,4 +242,65 @@ test("earlier timing pages include request, response, and tool metadata", async 
     end: Date.parse("2026-10-01T00:00:03.000Z"),
   }]);
   assert.deepEqual(reads.map((read) => read.messageBefore), [2_000, 1_000]);
+});
+
+test("cached completed timing preserves legacy, nested, missing, and live timing semantics", () => {
+  const start = Date.parse("2026-10-01T00:00:00.000Z");
+  const at = (ms) => new Date(start + ms).toISOString();
+  const readSnapshot = createSessionTimingSnapshotCache();
+  const completed = [
+    { role: "assistant", responseDurationMs: 900, modelStreamDurationMs: 600, providerWaitMs: 300 },
+    { role: "assistant", responseDurationMs: 0, providerWaitMs: 0 },
+    { role: "assistant", responseDurationMs: -1, modelStreamDurationMs: Number.NaN },
+    { role: "assistant", responseDurationMs: 9999, parentToolCallId: "delegate" },
+    { role: "tool", createdAt: at(1000), toolDurationMs: 4000, toolCompletedAt: at(5000) },
+    { role: "tool", createdAt: at(3000), toolDurationMs: 3000 },
+    { role: "tool", createdAt: "unknown", toolDurationMs: 200 },
+    { role: "tool", createdAt: at(0), toolDurationMs: 9999, nestedParentToolCallId: "nested" },
+  ].map(Object.freeze);
+  const live = [
+    { role: "assistant", status: "streaming", createdAt: at(7000), responseDurationMs: 100, modelStreamDurationMs: 50 },
+    { role: "tool", status: "streaming", toolStatus: "running", createdAt: at(5000), toolDurationMs: 500 },
+    { role: "assistant", status: "streaming", createdAt: at(9000) },
+    { role: "assistant", status: "streaming", createdAt: at(0), nestedParentToolCallId: "nested" },
+  ];
+  const earlierTotals = sumSessionTiming([
+    { role: "assistant", responseDurationMs: 100, providerWaitMs: 100 },
+    { role: "tool", createdAt: at(0), toolDurationMs: 2000 },
+  ]);
+  for (const messages of [completed, [...completed, ...live], [...completed, ...live, { role: "tool" }], completed.slice(2)]) {
+    const snapshot = readSnapshot(messages);
+    for (const now of [start + 10000, start + 15000]) {
+      for (const isRunning of [false, true]) {
+        const input = { createdAt: at(0), updatedAt: at(10000), isRunning, now, messages, earlierModelResponseMs: earlierTotals.modelResponseMs };
+        assert.deepEqual(calculateSessionTiming({
+          ...input, messages: snapshot.liveMessages,
+          earlierModelResponseMs: earlierTotals.modelResponseMs + snapshot.completedModelResponseMs,
+        }), calculateSessionTiming(input));
+        const breakdown = { elapsedMs: 10000, now, messages, earlierTotals, activeNetworkRequestStartedAt: start + 8000 };
+        assert.deepEqual(calculateSessionTimingBreakdown({
+          ...breakdown, messages: snapshot.liveMessages,
+          earlierTotals: combineSessionTimingTotals(earlierTotals, snapshot.completedTotals),
+        }), calculateSessionTimingBreakdown(breakdown));
+      }
+    }
+  }
+});
+
+test("immutable timing cache reuses rows but replaces edited and finalized snapshots", () => {
+  let reads = 0;
+  const row = Object.freeze({ role: "assistant", status: "complete", get responseDurationMs() { reads += 1; return 100; } });
+  const readSnapshot = createSessionTimingSnapshotCache();
+  assert.equal(readSnapshot([row]).completedModelResponseMs, 100);
+  const initialReads = reads;
+  const live = { role: "assistant", status: "streaming", createdAt: "2026-10-01T00:00:00.000Z" };
+  assert.equal(readSnapshot([row, live]).liveMessages[0], live);
+  assert.equal(reads, initialReads);
+  const edited = { ...row, responseDurationMs: 200 };
+  assert.equal(readSnapshot([edited]).completedModelResponseMs, 200);
+  const finalized = { ...live, status: "complete", responseDurationMs: 50 };
+  const snapshot = readSnapshot([edited, finalized]);
+  assert.equal(snapshot.completedModelResponseMs, 250);
+  assert.equal(snapshot.liveMessages.length, 0);
+  assert.equal(readSnapshot([]).completedModelResponseMs, 0);
 });

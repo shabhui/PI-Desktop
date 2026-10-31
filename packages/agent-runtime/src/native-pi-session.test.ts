@@ -1,8 +1,10 @@
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import fs, { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { AgentSession, ModelRuntime, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
+import { AgentSession, DefaultResourceLoader, hasTrustRequiringProjectResources, ModelRuntime, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { createAssistantMessageEventStream, PI_ATTRIBUTION, Type, type AssistantMessage } from "@earendil-works/pi-ai";
 import { NativePiSessionService } from "./native-pi-session.js";
 import {
@@ -12,12 +14,46 @@ import {
 
 const roots: string[] = [];
 
+// HOME alone does not isolate SDK ancestor discovery. Keep the real SDK trust
+// predicate and resource loader, but make out-of-fixture resource probes absent
+// before touching the host filesystem. No trust records or overrides are used.
+const resourceFs = { ...fs };
+let blockedResourceProbes = 0;
+function outsideFixtureResource(input: unknown): boolean {
+  if (typeof input !== "string" && !Buffer.isBuffer(input) && !(input instanceof URL)) return false;
+  const path = resolve(input instanceof URL ? fileURLToPath(input) : String(input));
+  if (!/(?:^|[\\/])\.(?:pi|agents|git)(?:[\\/]|$)|(?:^|[\\/])(?:AGENTS|CLAUDE|CONTEXT|SYSTEM|APPEND_SYSTEM)\.md$/i.test(path)) return false;
+  const owned = roots.some((root) => [root, resourceFs.realpathSync(root)].some((base) => {
+    const rel = relative(base, path);
+    return rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel);
+  }));
+  if (!owned) blockedResourceProbes += 1;
+  return !owned;
+}
+function guardResourceRead<T extends (...args: never[]) => unknown>(operation: T): T {
+  return new Proxy(operation, { apply(target, receiver, args: unknown[]) {
+    if (outsideFixtureResource(args[0])) {
+      throw Object.assign(new Error("Resource is outside the owned native fixture"), { code: "ENOENT" });
+    }
+    return Reflect.apply(target, receiver, args);
+  } });
+}
+
 beforeEach(() => {
   vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("Network forbidden in native fixtures"));
+  blockedResourceProbes = 0;
+  vi.spyOn(fs, "existsSync").mockImplementation((path) => !outsideFixtureResource(path) && resourceFs.existsSync(path));
+  vi.spyOn(fs, "readFileSync").mockImplementation(guardResourceRead(resourceFs.readFileSync));
+  vi.spyOn(fs, "readdirSync").mockImplementation(guardResourceRead(resourceFs.readdirSync));
+  vi.spyOn(fs, "statSync").mockImplementation(guardResourceRead(resourceFs.statSync));
+  vi.spyOn(fs, "lstatSync").mockImplementation(guardResourceRead(resourceFs.lstatSync));
+  vi.spyOn(fs, "openSync").mockImplementation(guardResourceRead(resourceFs.openSync));
+  syncBuiltinESMExports();
 });
 
 afterEach(() => {
   vi.restoreAllMocks();
+  syncBuiltinESMExports();
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
@@ -63,6 +99,56 @@ function sessionText(id: string, cwd: string, userText: string): string {
 }
 
 describe("NativePiSessionService", () => {
+  it("fences ancestor resources before SDK discovery without replacing its trust predicate", async () => {
+    const parent = mkdtempSync(join(tmpdir(), "pi-native-resource-boundary-"));
+    const root = join(parent, "isolated");
+    mkdirSync(root);
+    roots.push(root);
+    const project = join(root, "project");
+    const agentDir = join(root, "agent");
+    mkdirSync(project);
+    mkdirSync(agentDir);
+    const sentinel = join(parent, ".agents", "skills", "outside", "SKILL.md");
+    mkdirSync(join(parent, ".agents", "skills", "outside"), { recursive: true });
+    writeFileSync(sentinel, "---\nname: outside\ndescription: Must not load\n---\nFixture-only ancestor sentinel.\n");
+    writeFileSync(join(parent, "AGENTS.md"), "Must not enter the native model context.");
+    try {
+      expect(resourceFs.existsSync(sentinel)).toBe(true);
+      expect(existsSync(sentinel)).toBe(false);
+      expect(() => readFileSync(sentinel)).toThrow(/outside the owned native fixture/);
+      expect(hasTrustRequiringProjectResources(project)).toBe(false);
+      const loader = new DefaultResourceLoader({ cwd: project, agentDir });
+      await loader.reload();
+      expect(loader.getAgentsFiles().agentsFiles).toEqual([]);
+      expect(loader.getSkills().skills).toEqual([]);
+      expect(blockedResourceProbes).toBeGreaterThan(0);
+      mkdirSync(join(root, ".agents", "skills"), { recursive: true });
+      expect(hasTrustRequiringProjectResources(project)).toBe(true);
+    } finally {
+      roots.splice(roots.indexOf(root), 1);
+      rmSync(parent, { recursive: true, force: true });
+    }
+  });
+
+  for (const resource of ["project-settings", "ancestor-skills"]) {
+    it(`keeps untrusted ${resource} read-only inside the native fixture`, async () => {
+      const f = fixture();
+      if (resource === "project-settings") {
+        mkdirSync(join(f.project, ".pi"));
+        writeFileSync(join(f.project, ".pi", "settings.json"), "{}");
+      } else {
+        mkdirSync(join(f.root, ".agents", "skills"), { recursive: true });
+      }
+      const service = new NativePiSessionService(f);
+      try {
+        const [session] = await service.list();
+        expect(session.readOnlyReason).toBe("project-untrusted");
+        expect(session.capabilities?.canPrompt).toBe(false);
+        await expect(service.prompt(session.id, "must reject", () => {})).rejects.toMatchObject({ errorCode: "NATIVE_PI_PROJECT_UNTRUSTED" });
+      } finally { service.disposeAll(); }
+    });
+  }
+
   it("lists and projects a native v3 tree without changing its bytes", async () => {
     const f = fixture();
     const service = new NativePiSessionService({ agentDir: f.agentDir, sessionRoot: f.sessionRoot });

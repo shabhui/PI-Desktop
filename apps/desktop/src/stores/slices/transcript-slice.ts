@@ -7,7 +7,7 @@ import { isRenderableAttachment } from "@pi-desktop/shared";
 import { api } from "../../lib/api";
 import { resolveComposerSmartStop } from "../../lib/composer-smart-stop";
 import {
-  clearSessionPermissions,
+  removePermission,
   sessionPermissions,
 } from "../../lib/pending-permissions";
 import {
@@ -19,6 +19,7 @@ import { settleStoppedAssistantMetrics } from "../../lib/context-usage";
 import type { AppState } from "../app-state";
 import type { SessionRuntime } from "../runtime/session-runtime";
 import { prepareTranscriptAction } from "../runtime/transcript-action";
+import { runSessionAbort } from "../runtime/session-abort";
 import type { StoreAccess } from "./types";
 
 export type TranscriptSliceDependencies = StoreAccess & {
@@ -485,11 +486,15 @@ export function createTranscriptSlice({
       if (!sessionId) return;
       const target = stateBeforeAbort.sessions.find((session) => session.id === sessionId);
       if (!sessionAllows(target, "canStop")) return;
+      return runSessionAbort({ get, set }, runtime, sessionId, async (owner) => {
       if (target?.source === "pi-native" || isRemoteSession(target)) {
-        await api.abort(sessionId);
-        runtime.submittedComposerDrafts.delete(sessionId);
+        if (!(await owner.abort()) || !owner.isCurrent()) return;
         // Bypass in-flight pre-abort detail reads; request settled source state.
         const detail = await api.getSession(sessionId);
+        if (!owner.isCurrent()) return;
+        if (runtime.submittedComposerDrafts.get(sessionId) === owner.submittedDraft) {
+          runtime.submittedComposerDrafts.delete(sessionId);
+        }
         const messages = detail.session?.messages;
         if (messages) runtime.cacheSessionTranscript(sessionId, messages);
         set((current) => ({
@@ -499,7 +504,7 @@ export function createTranscriptSlice({
         }));
         return;
       }
-      const submittedDraft = runtime.submittedComposerDrafts.get(sessionId);
+      const submittedDraft = owner.submittedDraft;
       const pendingUserMessageId = stateBeforeAbort.messages
         .slice(submittedDraft?.messageCountBeforeSend ?? 0)
         .findLast((message) => message.role === "user")?.id;
@@ -516,8 +521,8 @@ export function createTranscriptSlice({
         stateBeforeAbort.pendingPermissions,
         sessionId,
       );
-      await Promise.allSettled([
-        api.abort(sessionId),
+      const [aborted] = await Promise.allSettled([
+        owner.abort(),
         ...pendingForSession.map((permission) =>
           api.resolvePermission({
             requestId: permission.requestId,
@@ -525,16 +530,27 @@ export function createTranscriptSlice({
           }),
         ),
       ]);
+      if (aborted.status === "rejected") throw aborted.reason;
+      if (!aborted.value || !owner.isCurrent()) {
+        submittedDraft?.resolveAbort?.(false);
+        if (submittedDraft) {
+          delete submittedDraft.abortResolution;
+          delete submittedDraft.resolveAbort;
+        }
+        return;
+      }
       set((current) => ({
-        pendingPermissions: clearSessionPermissions(
+        pendingPermissions: pendingForSession.reduce(
+          (permissions, permission) => removePermission(permissions, sessionId, permission.requestId),
           current.pendingPermissions,
-          sessionId,
         ),
       }));
       const state = get();
       if (state.activeSessionId !== sessionId) {
         submittedDraft?.resolveAbort?.(false);
-        runtime.submittedComposerDrafts.delete(sessionId);
+        if (runtime.submittedComposerDrafts.get(sessionId) === submittedDraft) {
+          runtime.submittedComposerDrafts.delete(sessionId);
+        }
         set((current) => ({
           runningSessions: { ...current.runningSessions, [sessionId]: false },
         }));
@@ -545,9 +561,18 @@ export function createTranscriptSlice({
         : resolveComposerSmartStop(state.messages, submittedDraft);
       let retainSubmittedDraft = false;
       if (smartStop.kind === "restore") {
-        const fullMessages = await runtime.loadFullSessionMessages(sessionId);
+        // A late read must not publish into the cache before ownership is checked.
+        const fullMessages = await runtime.loadFullSessionMessages(sessionId, false);
+        if (!owner.isCurrent()) {
+          submittedDraft?.resolveAbort?.(false);
+          return;
+        }
         if (!fullMessages || get().activeSessionId !== sessionId) {
           submittedDraft?.resolveAbort?.(false);
+          set((current) => ({
+            isRunning: current.activeSessionId === sessionId ? false : current.isRunning,
+            runningSessions: { ...current.runningSessions, [sessionId]: false },
+          }));
           return;
         }
         const merged = mergeLiveSessionMessages(fullMessages, get().messages);
@@ -571,6 +596,7 @@ export function createTranscriptSlice({
             }
             // A subsequent prompt can start after the host releases its mutation
             // lock. Never replace that prompt or its composer with this draft.
+            if (!owner.isCurrent()) return;
             const current = get();
             const latestMessages = current.activeSessionId === sessionId
               ? current.messages
@@ -581,6 +607,7 @@ export function createTranscriptSlice({
               runtime.cacheSessionTranscript(sessionId, fullStop.kept, fullWindow);
               set((current) => ({
                 messages: current.activeSessionId === sessionId ? fullStop.kept : current.messages,
+                retainedTranscripts: { ...current.retainedTranscripts, [sessionId]: fullStop.kept },
                 sessionHistory: { ...current.sessionHistory, [sessionId]: fullWindow },
                 composerPrefill: { ...fullStop.draft, sessionId },
                 isRunning: current.activeSessionId === sessionId ? false : current.isRunning,
@@ -590,24 +617,26 @@ export function createTranscriptSlice({
             void flushPendingSessionConfiguration(sessionId);
             return;
           } catch (error) {
+            if (!owner.isCurrent()) {
+              submittedDraft?.resolveAbort?.(false);
+              return;
+            }
             retainSubmittedDraft = true;
             // agent_end may have removed the old submission while abort waited.
             // Preserve it for recovery without replacing a newer submission.
             if (submittedDraft && !runtime.submittedComposerDrafts.has(sessionId)) {
               runtime.submittedComposerDrafts.set(sessionId, submittedDraft);
             }
-            set({
-              error: error instanceof Error ? error.message : String(error),
-              errorCode: (error as { code?: string })?.code ?? null,
-            });
+            const message = error instanceof Error ? error.message : String(error);
             const current = get();
-            if (
-              current.activeSessionId !== sessionId ||
-              current.messages.findLast((message) => message.role === "user")?.id !== pendingUserMessageId
-            ) {
-              submittedDraft?.resolveAbort?.(false);
-              return;
+            if (current.activeSessionId === sessionId) {
+              set({ error: message, errorCode: (error as { code?: string })?.code ?? null });
+            } else {
+              current.showToast(message, { variant: "error" });
             }
+            // Retraction failure preserves the durable prompt and recovery
+            // draft, but cannot undo the acknowledged cancellation. Continue
+            // through the session-scoped settlement even after navigation.
           }
         }
         set((current) =>
@@ -626,6 +655,7 @@ export function createTranscriptSlice({
       if (!retainSubmittedDraft && runtime.submittedComposerDrafts.get(sessionId) === submittedDraft) {
         runtime.submittedComposerDrafts.delete(sessionId);
       }
+      if (!owner.isCurrent()) return;
       const stoppedRows = (rows: UiMessage[]) =>
         rows.map((message) => {
           if (message.role === "assistant" && message.status === "streaming") {
@@ -650,10 +680,14 @@ export function createTranscriptSlice({
           current.activeSessionId === sessionId
             ? stoppedRows(current.messages)
             : current.messages,
-        isRunning: false,
+        isRunning: current.activeSessionId === sessionId ? false : current.isRunning,
         runningSessions: { ...current.runningSessions, [sessionId]: false },
       }));
       void flushPendingSessionConfiguration(sessionId);
+      }).catch(() => {
+        // The coordinator reports the failure; the toolbar must not leak a
+        // rejected promise or pretend that an unacknowledged Stop succeeded.
+      });
     },
   };
 }

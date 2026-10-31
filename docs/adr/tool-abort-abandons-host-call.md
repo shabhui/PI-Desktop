@@ -1,7 +1,7 @@
 # ADR: A user stop preserves tool side-effect boundaries
 
 - Status: Accepted for implementation
-- Date: 2026-10-20 (amended 2026-10-23)
+- Date: 2026-10-20 (amended 2026-10-23 and 2026-10-31)
 - Issues: #1767
 - Amends: spec 03-runtime/03-tools-and-permissions.md §3
 
@@ -37,8 +37,13 @@ The runtime sends typed `tools.abort` requests for in-flight tools. Host-core
 registers cancellation before permission evaluation, so stopping a pending
 approval or queued tool prevents it from starting. Local `Read`, `Glob`, and
 `Grep` calls may end the runtime's wait immediately because they are read-only;
-the host also observes cancellation and discards their result. The blocking
-filesystem worker may continue until it returns, but it cannot mutate files.
+the host forwards the typed signal to the actual filesystem worker. It checks
+before advancing traversal and between bounded content chunks, including long
+lines. The optional `rg` backend closes its output and kills/reaps its owned
+child. Host execution returns `TOOL_ABORTED` only after worker cleanup, never
+partial search success; its #1982 resource identity/permit lease survives until
+the filesystem body really exits. An in-progress OS operation may finish before
+the next cooperative checkpoint; this is not forced cancellation of kernel I/O.
 
 For `Bash` and `GenerateImages`, the runtime waits a bounded 10s grace window
 for the host to return output collected before process termination. For
@@ -46,10 +51,10 @@ mutating, MCP, and plugin calls, the runtime waits for the host result after
 requesting cancellation. A pending permission is cancelled; an operation that
 already started is not reported as stopped until its result arrives.
 
-Read-only and process-backed tools race their execution against cancellation.
-For a read-only local filesystem call, the Rust blocking worker may outlive the
-RPC, but its result is discarded. Mutating and desktop-dispatched tools are not
-locally abandoned while active.
+Read-only and process-backed tools race their runtime wait against cancellation.
+The read-only Host RPC itself waits for cooperative worker cleanup, rather than
+dropping a `spawn_blocking` future while its scan continues. Mutating and
+desktop-dispatched tools are not locally abandoned while active.
 
 The runtime also drives the tools from `abort()` itself, not only from the
 signal each tool was handed. `abort()` walks the in-flight tool calls and runs
@@ -65,9 +70,9 @@ alive minutes later.
 
 - A long-running read-only tool no longer holds the turn open after Stop, while
   pending permission prompts and admission waits are cancelled at the host.
-- Local filesystem workers and already-started extension operations may still
-  consume resources until they return. Mutating and extension results remain
-  observable before the runtime reports the turn settled.
+- Local filesystem workers stop cooperatively and release admission only after
+  real cleanup. Already-started mutating/extension operations remain observable
+  before the runtime reports the turn settled.
 - A new turn uses distinct tool call ids. Typed abort records also prevent an
   early abort for one tool name from being inherited by another tool.
 - Progress output for an abandoned call stops at the moment of the stop.

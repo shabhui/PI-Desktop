@@ -1198,8 +1198,11 @@ export const api = {
     invoke<SpeechSynthesizeResult>(IPC.invoke.speechSynthesize, req),
   compact: (req: AgentCompactRequest) =>
     invoke<AgentCompactResponse>(IPC.invoke.agentCompact, req),
-  abort: (sessionId: string) =>
-    invoke(IPC.invoke.agentAbort, { sessionId }),
+  abort: (sessionId: string, turnId?: string) =>
+    invoke<{ ok?: boolean; aborted?: boolean }>(IPC.invoke.agentAbort, {
+      sessionId,
+      ...(turnId ? { turnId } : {}),
+    }),
   stopSubagents: (req: AgentStopSubagentsRequest) =>
     invoke<AgentStopSubagentsResponse>(IPC.invoke.agentStopSubagents, req),
   stop: (sessionId: string, turnId?: string) =>

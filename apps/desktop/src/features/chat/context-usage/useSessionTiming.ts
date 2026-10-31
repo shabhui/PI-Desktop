@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   AgentActivity,
   SessionSummary,
@@ -8,6 +8,8 @@ import { api } from "../../../lib/api";
 import {
   calculateSessionTimingBreakdown,
   calculateSessionTiming,
+  combineSessionTimingTotals,
+  createSessionTimingSnapshotCache,
   loadEarlierSessionTiming,
   type SessionTimingBreakdown,
   type SessionTiming,
@@ -57,13 +59,20 @@ export function useSessionTiming({
   const historyCache = useRef(new Map<string, CachedSessionTiming>());
   const [historyLoad, setHistoryLoad] = useState<HistoryLoadState>();
   const [now, setNow] = useState(() => Date.now());
+  const [readTimingSnapshot] = useState(createSessionTimingSnapshotCache);
+  const canCalculate = enabled && Boolean(session);
+  const snapshot = useMemo(
+    () => canCalculate ? readTimingSnapshot(messages) : undefined,
+    [canCalculate, messages, readTimingSnapshot],
+  );
 
   useEffect(() => {
-    if (!enabled) return;
+    if (!canCalculate) return;
     setNow(Date.now());
+    if (!isRunning) return;
     const interval = window.setInterval(() => setNow(Date.now()), 1_000);
     return () => window.clearInterval(interval);
-  }, [enabled]);
+  }, [canCalculate, isRunning, sessionId]);
 
   useEffect(() => {
     if (!enabled || !sessionId || !hasMoreBefore || messageStart <= 0) return;
@@ -126,22 +135,31 @@ export function useSessionTiming({
     historyStatus === "ready" && historyLoad?.key === historyKey
       ? historyLoad.totals
       : undefined;
-  const timing = enabled && session
+  const completedTotals = useMemo(
+    () => snapshot
+      ? earlierTotals
+        ? combineSessionTimingTotals(earlierTotals, snapshot.completedTotals)
+        : snapshot.completedTotals
+      : undefined,
+    [earlierTotals, snapshot],
+  );
+  const timing = enabled && session && snapshot
     ? calculateSessionTiming({
         createdAt: session.createdAt,
         updatedAt: session.updatedAt,
         isRunning,
-        messages,
+        messages: snapshot.liveMessages,
         now,
-        earlierModelResponseMs: earlierTotals?.modelResponseMs ?? 0,
+        earlierModelResponseMs:
+          (earlierTotals?.modelResponseMs ?? 0) + snapshot.completedModelResponseMs,
       })
     : undefined;
-  const breakdown = timing
+  const breakdown = timing && snapshot
     ? calculateSessionTimingBreakdown({
         elapsedMs: timing.elapsedMs,
-        messages,
+        messages: snapshot.liveMessages,
         now,
-        ...(earlierTotals ? { earlierTotals } : {}),
+        earlierTotals: completedTotals,
         ...(modelRequestActivity?.phase === "waiting-model"
           ? { activeNetworkRequestStartedAt: modelRequestActivity.since }
           : {}),

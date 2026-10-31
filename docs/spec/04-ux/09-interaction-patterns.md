@@ -994,6 +994,14 @@ may be retained while exactly one workspace supplies the visible shell context.
   load earlier timing metadata in bounded pages only while the inspector is open.
   Older messages use their existing response duration for the model row; their
   request-wait time is unavailable.
+- Timing owns a one-second clock only while the inspector is open and the
+  session is running. Closing it suspends timing calculations and history loads;
+  an idle open inspector has no repeating clock. Completed immutable rows reuse
+  cached timing contributions across renders, streaming chunks, and clock ticks.
+  Changed row snapshots are recalculated; history cursor/session `updatedAt`
+  changes invalidate earlier-page totals. Late loads cannot publish into another
+  session. Live model/tool timing and overlapping-tool interval unions remain
+  authoritative; this is not a whole-application performance guarantee.
 
 ## 4. Long content collapse / expand
 

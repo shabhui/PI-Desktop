@@ -12,6 +12,16 @@
   Host/sidecar state instead of admitting an unconfigured provider process.
   See [Network and AI settings](../spec/04-ux/06-settings-ia.md) for defaults,
   reset semantics and scope. This entry does not mark the candidate as released.
+- Fixed Stop races across repeated clicks, session navigation, prompt admission,
+  and follow-up turns. Rejected cancellations no longer fake an idle state;
+  accepted stops settle their own turn even if history reload or unanswered
+  prompt retraction fails, without losing recovery drafts or changing another pane.
+- Read/Glob/Grep cancellation now reaches the actual Host filesystem worker and
+  owned `rg` child. File admission leases last through cleanup instead of leaving
+  abandoned scans behind after Stop; started writes retain their safety boundary.
+- The timing inspector stops its clock when idle or closed and reuses completed
+  immutable message totals during streaming. History edits still invalidate the
+  cache, and live model/tool timing keeps advancing.
 - Fixed prompt cache misses after a conversation's agent runtime is rebuilt
   (#1972). Rebuilding happens after a restart or when the thinking level, mode,
   project rules, or model settings change. Assistant replies now keep the

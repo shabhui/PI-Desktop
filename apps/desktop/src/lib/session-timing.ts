@@ -88,20 +88,61 @@ function emptySessionTimingTotals(): SessionTimingTotals {
   };
 }
 
+function addSessionTimingTotals(
+  target: SessionTimingTotals,
+  source: SessionTimingTotals,
+): SessionTimingTotals {
+  target.providerWaitMs += source.providerWaitMs;
+  target.hasProviderWait ||= source.hasProviderWait;
+  target.modelResponseMs += source.modelResponseMs;
+  target.hasModelResponse ||= source.hasModelResponse;
+  target.toolMessageCount += source.toolMessageCount;
+  target.toolTimingCount += source.toolTimingCount;
+  for (const interval of source.toolIntervals) target.toolIntervals.push(interval);
+  target.unplacedToolDurationMs += source.unplacedToolDurationMs;
+  return target;
+}
+
 export function combineSessionTimingTotals(
   left: SessionTimingTotals,
   right: SessionTimingTotals,
 ): SessionTimingTotals {
-  return {
-    providerWaitMs: left.providerWaitMs + right.providerWaitMs,
-    hasProviderWait: left.hasProviderWait || right.hasProviderWait,
-    modelResponseMs: left.modelResponseMs + right.modelResponseMs,
-    hasModelResponse: left.hasModelResponse || right.hasModelResponse,
-    toolMessageCount: left.toolMessageCount + right.toolMessageCount,
-    toolTimingCount: left.toolTimingCount + right.toolTimingCount,
-    toolIntervals: [...left.toolIntervals, ...right.toolIntervals],
-    unplacedToolDurationMs:
-      left.unplacedToolDurationMs + right.unplacedToolDurationMs,
+  return addSessionTimingTotals(
+    { ...left, toolIntervals: [...left.toolIntervals] },
+    right,
+  );
+}
+
+/** Cache immutable renderer rows, never live durations or a session's history. */
+export function createSessionTimingSnapshotCache() {
+  const completed = new WeakMap<SessionTimingMessage, {
+    modelResponseMs: number;
+    totals: SessionTimingTotals;
+  }>();
+  return (messages: readonly SessionTimingMessage[]) => {
+    const liveMessages: SessionTimingMessage[] = [];
+    const completedTotals = emptySessionTimingTotals();
+    let completedModelResponseMs = 0;
+    for (const message of messages) {
+      if (
+        message.status === "streaming" ||
+        (message.role === "tool" && message.toolStatus === "running")
+      ) {
+        liveMessages.push(message);
+        continue;
+      }
+      let cached = completed.get(message);
+      if (!cached) {
+        cached = {
+          modelResponseMs: sumModelResponseDuration([message]),
+          totals: sumSessionTiming([message], 0),
+        };
+        completed.set(message, cached);
+      }
+      completedModelResponseMs += cached.modelResponseMs;
+      addSessionTimingTotals(completedTotals, cached.totals);
+    }
+    return { liveMessages, completedTotals, completedModelResponseMs };
   };
 }
 

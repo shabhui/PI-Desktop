@@ -6,14 +6,17 @@
 //! Spawn failures and `rg` exit 2 fall back to the in-process searcher so a
 //! missing or broken install never changes the tool's public shape.
 
-use super::{clip_chars, display_tool_path, grep_output, BUDGET_SEARCH, MAX_LINE_CHARS};
+use super::{
+    clip_chars, display_tool_path, file_search, grep_output, BUDGET_SEARCH, MAX_LINE_CHARS,
+};
 use crate::workspace::ToolRoot;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
-use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{ExitStatus, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::io::AsyncReadExt;
+use tokio::process::{Child, Command};
 
 /// Cap on `rg --json` stdout so a pathological tree cannot fill host memory
 /// before we apply the Grep result budget.
@@ -32,6 +35,7 @@ pub struct SystemGrep<'a> {
     pub mode: &'a str,
     pub case_insensitive: bool,
     pub head_limit: usize,
+    pub cancellation: &'a file_search::Cancellation,
 }
 
 #[cfg(test)]
@@ -60,9 +64,14 @@ impl Drop for TestRgGuard {
     }
 }
 
-pub fn try_system_rg(req: SystemGrep<'_>) -> Option<Value> {
-    let rg = resolve_rg()?;
-    grep_with_rg(&rg, req)
+pub fn try_system_rg(req: SystemGrep<'_>) -> Result<Option<Value>, (String, String)> {
+    file_search::check(req.cancellation)?;
+    let Some(rg) = resolve_rg() else {
+        return Ok(None);
+    };
+    // Called only inside the file tool's blocking body. Tokio owns cancellable
+    // pipe I/O and child waiting; no detached reader or waiter thread is needed.
+    tokio::runtime::Handle::current().block_on(grep_with_rg(&rg, req))
 }
 
 fn resolve_rg() -> Option<PathBuf> {
@@ -83,7 +92,7 @@ fn resolve_rg() -> Option<PathBuf> {
     }
 }
 
-fn grep_with_rg(rg: &Path, req: SystemGrep<'_>) -> Option<Value> {
+async fn grep_with_rg(rg: &Path, req: SystemGrep<'_>) -> Result<Option<Value>, (String, String)> {
     let mut args: Vec<String> = vec!["--json".into(), "--no-config".into(), "--hidden".into()];
     // Per-file cap: content never needs more than headLimit hits from one file.
     // count mode needs the real per-file total, so it is left unbounded.
@@ -112,48 +121,112 @@ fn grep_with_rg(rg: &Path, req: SystemGrep<'_>) -> Option<Value> {
     args.push("--".into());
     args.push(req.search_dir.to_string_lossy().into_owned());
 
-    let mut child = Command::new(rg)
+    file_search::check(req.cancellation)?;
+    let Ok(mut child) = Command::new(rg)
         .args(&args)
-        // `--ignore-file` patterns are matched relative to the working
-        // directory, so anchor it at the ignore root.
+        // `--ignore-file` patterns are relative to the working directory.
         .current_dir(req.ignore_root)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
+        .kill_on_drop(true)
         .spawn()
-        .ok()?;
-    let stdout = child.stdout.take()?;
-    let mut reader = BufReader::with_capacity(64 * 1024, stdout);
-    let mut raw = String::new();
+    else {
+        return Ok(None);
+    };
+    #[cfg(test)]
+    super::file_search_tests::child_spawned(child.id().unwrap());
+    let Some(mut stdout) = child.stdout.take() else {
+        stop_owned_child(&mut child).await?;
+        return Ok(None);
+    };
+    let mut cancellation = req.cancellation.clone();
+    let mut chunk = [0; file_search::CHUNK_BYTES];
+    let mut raw = Vec::new();
     let mut total = 0_usize;
     let mut capped = false;
+    let mut failed = false;
+    let mut aborted = false;
     let mut parsed: BTreeMap<PathBuf, FileHits> = BTreeMap::new();
-    loop {
-        raw.clear();
-        match reader.read_line(&mut raw) {
-            Ok(0) => break,
-            Ok(n) => {
-                total = total.saturating_add(n);
-                if total > RG_STDOUT_CAP {
-                    capped = true;
-                    let _ = child.kill();
-                    break;
-                }
-                consume_rg_line(&raw, req.search_dir, &mut parsed);
+    'read: loop {
+        #[cfg(test)]
+        super::file_search_tests::checkpoint(super::file_search_tests::Stage::RgRead);
+        let n = tokio::select! {
+            biased;
+            _ = file_search::cancelled(&mut cancellation) => {
+                aborted = true;
+                break;
             }
-            Err(_) => {
-                let _ = child.kill();
-                return None;
+            result = stdout.read(&mut chunk) => match result {
+                Ok(n) => n,
+                Err(_) => { failed = true; break; }
+            },
+        };
+        total = total.saturating_add(n);
+        if total > RG_STDOUT_CAP {
+            capped = true;
+            break;
+        }
+        if n == 0 {
+            if let Ok(line) = std::str::from_utf8(&raw) {
+                consume_rg_line(line, req.search_dir, &mut parsed);
+            } else {
+                failed = true;
+            }
+            break;
+        }
+        // Unlike read_line, both cancellation and the byte cap apply even
+        // when rg is writing an enormous or unterminated JSON event.
+        for part in chunk[..n].split_inclusive(|byte| *byte == b'\n') {
+            raw.extend_from_slice(part);
+            if part.last() == Some(&b'\n') {
+                let Ok(line) = std::str::from_utf8(&raw) else {
+                    failed = true;
+                    break 'read;
+                };
+                consume_rg_line(line, req.search_dir, &mut parsed);
+                raw.clear();
             }
         }
     }
-    let status = child.wait().ok()?;
-    // 0 = matches, 1 = no matches. Anything else is an rg failure: fall back.
-    if !status.success() && status.code() != Some(1) {
-        return None;
+    // Close our pipe before terminating the direct child. No read future or
+    // background reader survives this body, including on malformed output.
+    drop(stdout);
+    let status = if aborted || failed || capped {
+        stop_owned_child(&mut child).await?
+    } else {
+        tokio::select! {
+            biased;
+            _ = file_search::cancelled(&mut cancellation) => {
+                aborted = true;
+                stop_owned_child(&mut child).await?
+            }
+            status = child.wait() => status.map_err(|error| {
+                ("TOOL_FAILED".into(), format!("rg wait failed: {error}"))
+            })?,
+        }
+    };
+    if aborted {
+        return Err(file_search::aborted());
     }
+    file_search::check(req.cancellation)?;
+    // Preserve the installed-but-broken fallback (0 = matches, 1 = no matches).
+    if failed || (!status.success() && status.code() != Some(1)) {
+        return Ok(None);
+    }
+    Ok(Some(build_result(req, parsed, capped)))
+}
 
-    Some(build_result(req, parsed, capped))
+async fn stop_owned_child(child: &mut Child) -> Result<ExitStatus, (String, String)> {
+    if let Err(error) = child.start_kill() {
+        // Still wait: a failed kill is not evidence that the child exited and
+        // must not release the caller's file lease early.
+        tracing::warn!(%error, "failed to stop owned rg child; waiting for exit");
+    }
+    child
+        .wait()
+        .await
+        .map_err(|error| ("TOOL_FAILED".into(), format!("rg cleanup failed: {error}")))
 }
 
 struct FileHits {

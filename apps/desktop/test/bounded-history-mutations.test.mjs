@@ -33,12 +33,14 @@ function harness(overrides = {}) {
     abort: async () => {}, ...overrides.api,
   };
   const runtime = { loadFullSessionMessages: async () => previous, cacheSessionTranscript() {}, sessionTranscriptCache: new Map(), submittedComposerDrafts: new Map(), ...overrides.runtime };
+  const sessionAbort = load("../src/stores/runtime/session-abort.ts", { "../../lib/api": { api } });
   const { createTranscriptSlice } = load("../src/stores/slices/transcript-slice.ts", {
     i18next: { default: { t: (key) => key } }, "../../lib/api": { api },
     "../../lib/remote-session-safety": safety, "@pi-desktop/shared": {},
     "../../lib/composer-smart-stop": smartStop, "../../lib/pending-permissions": permissions,
     "../../lib/session-transcript": transcript, "../../lib/workspace-review": {},
     "../../lib/context-usage": { settleStoppedAssistantMetrics: (message) => message }, "../runtime/transcript-action": {},
+    "../runtime/session-abort": sessionAbort,
   });
   const actions = createTranscriptSlice({ get: () => state, set: (update) => { state = { ...state, ...(typeof update === "function" ? update(state) : update) }; }, runtime, flushPendingSessionConfiguration: async () => {} });
   return { actions, calls, runtime, state: () => state, update: (next) => { state = { ...state, ...next }; } };

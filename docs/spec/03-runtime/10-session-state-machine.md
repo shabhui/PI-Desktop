@@ -107,6 +107,16 @@ turn that has ended.
    tool row begins, abort preserves the partial transcript and restores no
    draft. The snapshot keeps structured file/image references and is never
    reconstructed by parsing model-facing `@path` text.
+   Composer and session-level Stop share one in-flight operation per runtime
+   and session. The captured turn, submission, latest user row, and terminal
+   result fence every asynchronous publication, including retained transcripts.
+   Transport failure or a negative cancellation acknowledgement preserves the
+   running turn and permits retry; destructive callers receive the failure.
+   An accepted cancellation still settles its owned turn if subsequent history
+   loading or prompt retraction fails. Failed retraction keeps the durable
+   prompt and recovery snapshot, and reports errors only in the originating
+   session or a background toast. It cannot release a newer turn, overwrite
+   another pane, or remove permissions created after Stop began.
 5. A local permission remains in `waiting_permission` until explicit allow,
    deny, cancellation, or host shutdown; an explicit deny then moves to tool
    denied and the agent may continue or end based on runtime handling

@@ -2253,6 +2253,12 @@ identify the platform validation still needed.
   Hold its `tools.abort` acknowledgement as well and repeat for Read and Glob.
   6) Start a Write that is waiting for permission, press Stop, then try to
   approve the stale request. 7) Observe the transcript, composer, and workspace.
+  8) Repeat Stop through composer and session/delete entry points while its
+  reply is held; test rejection, negative acknowledgement, and retry.
+  9) Switch panes or finish a newer turn before old abort/history/retraction
+  replies arrive; also fail history reads and retraction after accepted abort.
+  10) Hold real Host traversal/content/rg work at an in-flight barrier, cancel
+  its exact typed call, and attempt conflicting file admission before cleanup.
 - **Expected**: The first Stop is honored even if prompt admission is still in
   progress; the unanswered send is undone and its draft restored. The
   streaming send stops with its partial response preserved and no draft
@@ -2263,6 +2269,14 @@ identify the platform validation still needed.
   Stopping the pending Write cancels its permission;
   approving the stale request fails and creates no file. A mutating operation
   that already started is not reported stopped before its Host result arrives.
+  Duplicate entry points issue one pending abort. Only the captured turn,
+  submission, permissions, and transcript may settle. Rejected aborts preserve
+  running state; accepted aborts do not become running again after a follow-up
+  read/retraction failure. Failed retraction preserves the durable prompt and
+  structured recovery draft without writing an error into the new pane.
+  Real search workers stop at bounded checkpoints, return no partial success,
+  reap their owned rg child, and retain conflicting leases until actual exit.
+  A subsequent file request is admitted; wrong call/tool aborts do not cancel it.
 - **Specs linked**: `03-runtime/02-agent-runtime.md`,
   `03-runtime/03-tools-and-permissions.md`, `03-runtime/06-host-rpc-protocol.md`,
   ADR `tool-abort-abandons-host-call`
@@ -2276,8 +2290,32 @@ identify the platform validation still needed.
   `node scripts/e2e-read-only-stop.mjs` runs the production sidecar bundle and
   a localhost provider, holding execution and cancellation responses at the Host
   edge. It verifies follow-up prompts and the Write settlement boundary;
-  rendered Electron interaction remains
-  a manual validation run.
+  `apps/desktop/test/session-stop-user-path.test.mjs` executes the actual store/API
+  with controlled preload replies, including structured file/image drafts and
+  retained-pane races. Host `tools_search_cancellation_*` tests hold the actual
+  workers and assert cleanup/lease lifetime. These are not packaged toolbar or
+  live-provider acceptance; full rendered Stop interaction remains manual.
+
+#### E2E-CHAT-timing-cache-and-idle-clock
+
+- **Preconditions**: A controlled clock, a transcript with completed and live
+  model/tool rows, and delayed historical pages for distinct sessions.
+- **Steps**: Open/close the timing inspector, start and complete a turn, stream
+  new chunks, advance its clock, edit persisted history, reopen, switch sessions
+  while a page is held, then unmount.
+- **Expected**: Closed/idle inspectors have no repeating clock; closed inspectors
+  do no timing reads. Completed immutable rows reuse their contributions across
+  ticks/renders/chunks, while live timing advances. Edits invalidate totals,
+  stable reopen reuses history, late pages cannot overwrite another session, and
+  all clocks are disposed. Nested/legacy timing and tool interval unions agree
+  with the uncached calculations.
+- **Specs linked**: `04-ux/09-interaction-patterns.md`
+- **Acceptance**: C (conversation timing)
+- **Milestone**: M2
+- **Status**: `apps/desktop/test/session-timing-user-path.test.mjs` mounts the real
+  hook/API in isolated Electron/React with a controlled preload and clock;
+  `session-timing.test.mjs` covers arithmetic and cached/uncached equivalence.
+  This is not a whole-app latency/FPS benchmark or packaged-inspector acceptance.
 
 #### E2E-171: Streaming reply survives quit, crash, and stop
 

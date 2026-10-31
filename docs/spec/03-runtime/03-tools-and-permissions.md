@@ -216,8 +216,13 @@ output collected before termination. Local `Read`, `Glob`, and `Grep` calls may
 end the runtime's wait immediately and return `TOOL_ABORTED`; their results are
 discarded. This local stop does not wait for the `tools.abort` acknowledgement;
 late success or failure of either Host request cannot affect a subsequent turn.
-A blocking filesystem worker may continue until it returns, but
-these tools do not mutate the workspace. For a mutating, MCP, or plugin call
+Host-core forwards the typed signal to the actual filesystem worker, checking
+before traversal advances and between bounded content chunks, including long
+lines. The optional `rg` child is killed and reaped with its output closed.
+The Host RPC returns only after actual worker cleanup; file admission/resource
+leases remain held until then, and cancellation never returns partial success.
+An in-progress OS operation may finish before the next cooperative checkpoint.
+For a mutating, MCP, or plugin call
 that has already started, the runtime waits for the host result before it
 settles the turn, so Stop cannot hide a write or extension action that is still
 running. Typed cancellation records include the tool name and cannot be

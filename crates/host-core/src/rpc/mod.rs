@@ -4799,7 +4799,7 @@ async fn handle_request(
                     )
                     .await
                 } else {
-                    let execute = tools::execute_tool_with_file_lease(
+                    tools::execute_tool_with_file_control(
                         ws_path.as_deref(),
                         scratch_path.as_deref(),
                         &p.tool_name,
@@ -4811,20 +4811,14 @@ async fn handle_request(
                             hashline: Some(hashline_ctx),
                             visualization_root: visualization_path.as_deref(),
                         },
-                        Some(tool_permit.clone()),
-                        file_resources.clone(),
-                    );
-                    if matches!(p.tool_name.as_str(), "Read" | "Glob" | "Grep") {
-                        let mut read_cancellation = cancellation_receiver.clone();
-                        tokio::select! {
-                            result = execute => result,
-                            _ = wait_for_tool_cancellation(&mut read_cancellation) => {
-                                tool_aborted_result(&p, call_started)
-                            }
-                        }
-                    } else {
-                        execute.await
-                    }
+                        tools::FileToolControl {
+                            lease: Some(tool_permit.clone()).zip(file_resources.clone()),
+                            cancellation: cancellation_receiver.clone(),
+                        },
+                    )
+                    // The worker observes the typed signal and returns only
+                    // after filesystem work and owned-child cleanup have ended.
+                    .await
                 };
                 result.tool_call_id = p.tool_call_id.clone();
 
@@ -9217,6 +9211,211 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(late_resolution.data.unwrap()["errorCode"], "NOT_FOUND");
+    }
+
+    use crate::tools;
+
+    async fn assert_search_worker_cancellation(tool: &str, stage: tools::file_search_tests::Stage) {
+        use std::future::{poll_fn, Future};
+        use std::sync::atomic::Ordering;
+        use std::task::Poll;
+        use tools::file_search_tests::{self, RgFixture, Stage};
+
+        let data = tempfile::tempdir().unwrap();
+        let project = data.path().join("project");
+        fs::create_dir(&project).unwrap();
+        fs::write(
+            project.join("sample.txt"),
+            format!("needle{}", "x".repeat(3 * 64 * 1024)),
+        )
+        .unwrap();
+        for name in ["a.txt", "b.txt", "c.txt"] {
+            fs::write(project.join(name), "needle\n").unwrap();
+        }
+        let mut app = AppState::open(data.path()).unwrap();
+        app.handshook = true;
+        let session = sessions::create_session(
+            &app.db,
+            Some("Cancel search".into()),
+            Some("agent".into()),
+            None,
+            None,
+            Some(project.to_string_lossy().into_owned()),
+        )
+        .unwrap();
+        sessions::configure_session_with_thinking(
+            &app.db,
+            &session.id,
+            "agent",
+            None,
+            None,
+            None,
+            Some("auto"),
+        )
+        .unwrap();
+        let budget = app.tool_budget.clone();
+        let state = Arc::new(Mutex::new(app));
+        let fixture = (stage == Stage::RgRead).then(RgFixture::new);
+        let rg_scope = fixture
+            .as_ref()
+            .map(|rg| tools::file_search_tests::install_rg(rg.program.clone()));
+        let (probe, entered, leave, mut finished) = file_search_tests::barrier(stage);
+        let scope = file_search_tests::install(Some(probe.clone()));
+        let args = if tool == "Glob" {
+            json!({"pattern":"*.txt"})
+        } else {
+            json!({"pattern":"needle", "path":"sample.txt"})
+        };
+        let mut execution = Box::pin(handle_request(
+            state.clone(),
+            "tools.execute",
+            json!({"sessionId":session.id, "toolCallId":"search", "toolName":tool, "args":args, "mode":"agent"}),
+            mpsc::unbounded_channel().0,
+        ));
+        tokio::select! {
+            entered = entered => entered.unwrap(),
+            result = &mut execution => panic!("search finished before its in-flight barrier: {result:?}"),
+        }
+        drop(scope);
+        drop(rg_scope);
+        let target_signal = state
+            .lock()
+            .await
+            .active_tool_cancellations
+            .get(&(session.id.clone(), "search".into(), tool.into()))
+            .unwrap()
+            .subscribe();
+        for (call, name) in [("search", "Read"), ("other-call", tool)] {
+            handle_request(
+                state.clone(),
+                "tools.abort",
+                json!({"sessionId":session.id,"toolCallId":call,"toolName":name}),
+                mpsc::unbounded_channel().0,
+            )
+            .await
+            .unwrap();
+            assert!(
+                !*target_signal.borrow(),
+                "wrong type/call cancelled this search"
+            );
+        }
+        let write_resources = crate::file_resources::FileResources::resolve(
+            Some(&project),
+            &crate::workspace::ContainedRoots::new(),
+            "Write",
+            &json!({"path":"new.txt"}),
+            false,
+        );
+        let mut conflicting =
+            Box::pin(budget.acquire_files("next", "Write", false, write_resources, None));
+        poll_fn(|cx| {
+            assert!(conflicting.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        let aborted = handle_request(
+            state.clone(),
+            "tools.abort",
+            json!({"sessionId":session.id,"toolCallId":"search","toolName":tool}),
+            mpsc::unbounded_channel().0,
+        )
+        .await
+        .unwrap();
+        assert_eq!(aborted["found"], true);
+        assert!(*target_signal.borrow());
+        let early = poll_fn(|cx| {
+            Poll::Ready(match execution.as_mut().poll(cx) {
+                Poll::Ready(result) => Some(result),
+                Poll::Pending => None,
+            })
+        })
+        .await;
+        poll_fn(|cx| {
+            assert!(
+                conflicting.as_mut().poll(cx).is_pending(),
+                "lease released while worker is blocked"
+            );
+            Poll::Ready(())
+        })
+        .await;
+        assert_eq!(budget.snapshot().active, 1);
+        leave.send(()).unwrap();
+        let completion = tokio::time::timeout(Duration::from_secs(5), &mut finished).await;
+        let stopped_itself = completion.is_ok();
+        let worker_error = match completion {
+            Ok(result) => result.unwrap(),
+            Err(_) => {
+                // Always clean up the fixture even for the red baseline.
+                fixture
+                    .as_ref()
+                    .expect("only rg can wait for fixture EOF")
+                    .release();
+                tokio::time::timeout(Duration::from_secs(5), &mut finished)
+                    .await
+                    .unwrap()
+                    .unwrap()
+            }
+        };
+        let returned_early = early.is_some();
+        let result = match early {
+            Some(result) => result,
+            None => execution.await,
+        }
+        .unwrap();
+        drop(conflicting.await.unwrap());
+        assert_eq!(budget.snapshot().active, 0);
+        assert!(
+            !state.lock().await.active_tool_cancellations.contains_key(&(
+                session.id.clone(),
+                "search".into(),
+                tool.into()
+            ))
+        );
+        if fixture.is_some() {
+            assert!(!file_search_tests::child_alive(
+                probe.child_pid.load(Ordering::SeqCst) as u32
+            ));
+        }
+        let fresh = handle_request(state, "tools.execute",
+            json!({"sessionId":session.id,"toolCallId":"fresh","toolName":"Read","args":{"path":"a.txt"},"mode":"agent"}),
+            mpsc::unbounded_channel().0).await.unwrap();
+        assert_eq!(fresh["ok"], true, "fresh work must be admitted after exit");
+        assert_eq!(
+            result["content"],
+            json!({"error":"tool aborted","code":"TOOL_ABORTED"})
+        );
+        assert_eq!(result["errorCode"], "TOOL_ABORTED");
+        assert_eq!(result["isError"], true);
+        assert!(
+            stopped_itself,
+            "cancelled rg waited for fixture EOF instead of killing/reaping its child"
+        );
+        assert_eq!(
+            worker_error.as_deref(),
+            Some("TOOL_ABORTED"),
+            "the actual worker returned partial success after cancellation"
+        );
+        assert_eq!(
+            probe.visits.load(Ordering::SeqCst),
+            2,
+            "worker advanced beyond its cancellation checkpoint"
+        );
+        assert!(!returned_early, "RPC returned before its worker exited");
+    }
+
+    #[tokio::test]
+    async fn tools_search_cancellation_glob_stops_traversal_and_holds_lease() {
+        assert_search_worker_cancellation("Glob", tools::file_search_tests::Stage::Walk).await;
+    }
+
+    #[tokio::test]
+    async fn tools_search_cancellation_grep_stops_inside_a_long_line() {
+        assert_search_worker_cancellation("Grep", tools::file_search_tests::Stage::Chunk).await;
+    }
+
+    #[tokio::test]
+    async fn tools_search_cancellation_rg_reaps_owned_child() {
+        assert_search_worker_cancellation("Grep", tools::file_search_tests::Stage::RgRead).await;
     }
 
     #[tokio::test]
