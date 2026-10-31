@@ -19,6 +19,7 @@ pub use tag::{
 
 use serde_json::{json, Map, Value};
 use std::collections::BTreeSet;
+#[cfg(test)]
 use std::path::Path;
 
 pub struct HashlineContext<'a> {
@@ -126,6 +127,7 @@ pub fn record_write(
     );
 }
 
+#[cfg(test)]
 pub fn record_grep_file(
     ctx: Option<&HashlineContext<'_>>,
     canonical_path: &Path,
